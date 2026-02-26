@@ -31,7 +31,6 @@ pub enum JitNyiReason {
     UnsupportedArch,
     HotLoopThresholdZero,
     UnsupportedOpcode(u8),
-    HostCall,
     JumpToNonRoot { target: usize },
     BackwardGuard { target: usize },
     InvalidJumpTarget { target: usize },
@@ -46,7 +45,6 @@ impl JitNyiReason {
             JitNyiReason::UnsupportedArch => "target architecture is not x86_64".to_string(),
             JitNyiReason::HotLoopThresholdZero => "hot_loop_threshold must be > 0".to_string(),
             JitNyiReason::UnsupportedOpcode(op) => format!("unsupported opcode 0x{op:02X}"),
-            JitNyiReason::HostCall => "opcode call is NYI in trace JIT".to_string(),
             JitNyiReason::JumpToNonRoot { target } => {
                 format!("opcode br to non-root target {target} is NYI")
             }
@@ -87,7 +85,14 @@ pub enum TraceStep {
     Dup,
     Ldloc(u8),
     Stloc(u8),
-    GuardFalse { exit_ip: usize },
+    Call {
+        index: u16,
+        argc: u8,
+        call_ip: usize,
+    },
+    GuardFalse {
+        exit_ip: usize,
+    },
     JumpToRoot,
     Ret,
 }
@@ -97,6 +102,7 @@ pub struct JitTrace {
     pub id: usize,
     pub root_ip: usize,
     pub start_line: Option<u32>,
+    pub has_call: bool,
     pub steps: Vec<TraceStep>,
     pub terminal: JitTraceTerminal,
     pub executions: u64,
@@ -228,6 +234,12 @@ impl TraceJitEngine {
         self.traces.get(trace_id).cloned()
     }
 
+    pub fn trace_has_call(&self, trace_id: usize) -> bool {
+        self.traces
+            .get(trace_id)
+            .is_some_and(|trace| trace.has_call)
+    }
+
     pub fn mark_trace_executed(&mut self, trace_id: usize) {
         if let Some(trace) = self.traces.get_mut(trace_id) {
             trace.executions = trace.executions.saturating_add(1);
@@ -316,6 +328,7 @@ impl TraceJitEngine {
         let mut steps = Vec::new();
 
         while steps.len() < self.config.max_trace_len {
+            let instr_ip = ip;
             let opcode = *code
                 .get(ip)
                 .ok_or(JitNyiReason::InvalidJumpTarget { target: ip })?;
@@ -423,7 +436,15 @@ impl TraceJitEngine {
                 return Err(JitNyiReason::JumpToNonRoot { target });
             }
             if opcode == OpCode::Call as u8 {
-                return Err(JitNyiReason::HostCall);
+                let index =
+                    read_u16(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call"))?;
+                let argc = read_u8(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call"))?;
+                steps.push(TraceStep::Call {
+                    index,
+                    argc,
+                    call_ip: instr_ip,
+                });
+                continue;
             }
 
             return Err(JitNyiReason::UnsupportedOpcode(opcode));
@@ -446,10 +467,14 @@ impl TraceJitEngine {
             .debug
             .as_ref()
             .and_then(|debug| debug.line_for_offset(root_ip));
+        let has_call = steps
+            .iter()
+            .any(|step| matches!(step, TraceStep::Call { .. }));
         self.traces.push(JitTrace {
             id,
             root_ip,
             start_line,
+            has_call,
             steps,
             terminal,
             executions: 0,
@@ -500,6 +525,7 @@ fn trace_step_name(step: &TraceStep) -> &'static str {
         TraceStep::Dup => "dup",
         TraceStep::Ldloc(_) => "ldloc",
         TraceStep::Stloc(_) => "stloc",
+        TraceStep::Call { .. } => "call",
         TraceStep::GuardFalse { .. } => "guard_false",
         TraceStep::JumpToRoot => "jump_root",
         TraceStep::Ret => "ret",
@@ -561,10 +587,6 @@ fn read_u16(code: &[u8], ip: &mut usize) -> Option<u16> {
 
 fn nyi_reference() -> Vec<JitNyiDoc> {
     vec![
-        JitNyiDoc {
-            item: "call",
-            reason: "trace JIT does not yet compile host calls",
-        },
         JitNyiDoc {
             item: "br (to non-root target)",
             reason: "only loop-back jumps to trace root are supported",

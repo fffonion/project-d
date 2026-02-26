@@ -317,25 +317,32 @@ fn perf_jit_native_reduces_tight_loop_latency() {
     let compiled = compile_source(&source).expect("compile should succeed");
     let expected_per_outer = INNER_LOOP_ITERS * INNER_LOOP_ITERS + 3 * INNER_LOOP_ITERS;
     let expected = OUTER_LOOPS * expected_per_outer;
+    let expected_stack = vec![Value::Int(expected)];
 
-    let _ = run_sum_loop_with_jit(&compiled.program, compiled.locals, false, expected);
-    let _ = run_sum_loop_with_jit(&compiled.program, compiled.locals, true, expected);
+    let warmup_interpreter =
+        run_sum_loop_with_jit(&compiled.program, compiled.locals, false, expected);
+    let warmup_jit = run_sum_loop_with_jit(&compiled.program, compiled.locals, true, expected);
+    assert_eq!(warmup_interpreter.stack, expected_stack);
+    assert_eq!(warmup_jit.stack, warmup_interpreter.stack);
 
     let mut interpreter_times = Vec::with_capacity(TRIALS);
     let mut jit_times = Vec::with_capacity(TRIALS);
-    for _ in 0..TRIALS {
-        interpreter_times.push(run_sum_loop_with_jit(
-            &compiled.program,
-            compiled.locals,
-            false,
-            expected,
-        ));
-        jit_times.push(run_sum_loop_with_jit(
-            &compiled.program,
-            compiled.locals,
-            true,
-            expected,
-        ));
+    for trial in 0..TRIALS {
+        let interpreter_run =
+            run_sum_loop_with_jit(&compiled.program, compiled.locals, false, expected);
+        let jit_run = run_sum_loop_with_jit(&compiled.program, compiled.locals, true, expected);
+
+        assert_eq!(
+            interpreter_run.stack, expected_stack,
+            "interpreter result mismatch on trial {trial}",
+        );
+        assert_eq!(
+            jit_run.stack, interpreter_run.stack,
+            "native JIT result mismatch on trial {trial}",
+        );
+
+        interpreter_times.push(interpreter_run.elapsed);
+        jit_times.push(jit_run.elapsed);
     }
 
     let interpreter_median = median_duration(&mut interpreter_times);
@@ -361,7 +368,7 @@ fn run_sum_loop_with_jit(
     local_count: usize,
     enable_jit: bool,
     expected: i64,
-) -> std::time::Duration {
+) -> PerfRun {
     let mut vm = Vm::with_locals(program.clone(), local_count);
     vm.set_jit_config(JitConfig {
         enabled: enable_jit,
@@ -387,7 +394,15 @@ fn run_sum_loop_with_jit(
         );
     }
 
-    elapsed
+    PerfRun {
+        elapsed,
+        stack: vm.stack().to_vec(),
+    }
+}
+
+struct PerfRun {
+    elapsed: std::time::Duration,
+    stack: Vec<Value>,
 }
 
 fn median_duration(samples: &mut [std::time::Duration]) -> std::time::Duration {

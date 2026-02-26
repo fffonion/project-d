@@ -451,6 +451,7 @@ enum StepExecOutcome {
 enum TraceExecOutcome {
     Continue,
     Halted,
+    Yielded,
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -620,6 +621,7 @@ impl Vm {
                     match self.execute_jit_entry(trace_id)? {
                         TraceExecOutcome::Continue => continue,
                         TraceExecOutcome::Halted => return Ok(VmStatus::Halted),
+                        TraceExecOutcome::Yielded => return Ok(VmStatus::Yielded),
                     }
                 }
             }
@@ -744,43 +746,8 @@ impl Vm {
                 let call_ip = self.ip - 1;
                 let index = self.read_u16()?;
                 let argc_u8 = self.read_u8()?;
-                let argc = argc_u8 as usize;
-                let mut args = Vec::with_capacity(argc);
-                for _ in 0..argc {
-                    args.push(self.pop_value()?);
-                }
-                args.reverse();
-
-                let resolved_index = self.resolve_call_target(index, argc_u8)?;
-                self.call_depth += 1;
-
-                let function_ptr = self
-                    .host_functions
-                    .get_mut(resolved_index as usize)
-                    .ok_or(VmError::InvalidCall(index))?
-                    as *mut VmHostFunction;
-
-                let outcome = unsafe {
-                    match &mut *function_ptr {
-                        VmHostFunction::Dynamic(function) => function.call(self, &args)?,
-                        VmHostFunction::Static(function) => function(self, &args)?,
-                    }
-                };
-                self.call_depth = self.call_depth.saturating_sub(1);
-
-                match outcome {
-                    CallOutcome::Return(values) => {
-                        for value in values {
-                            self.stack.push(value);
-                        }
-                    }
-                    CallOutcome::Yield => {
-                        for value in args {
-                            self.stack.push(value);
-                        }
-                        self.ip = call_ip;
-                        return Ok(StepExecOutcome::Yielded);
-                    }
+                if self.execute_host_call(index, argc_u8, call_ip)? {
+                    return Ok(StepExecOutcome::Yielded);
                 }
             }
             other => return Err(VmError::InvalidOpcode(other)),
@@ -881,6 +848,15 @@ impl Vm {
                         .ok_or(VmError::InvalidLocal(*index))?;
                     *slot = value;
                 }
+                crate::jit::TraceStep::Call {
+                    index,
+                    argc,
+                    call_ip,
+                } => {
+                    if self.execute_host_call(*index, *argc, *call_ip)? {
+                        return Ok(TraceExecOutcome::Yielded);
+                    }
+                }
                 crate::jit::TraceStep::GuardFalse { exit_ip } => {
                     let condition = self.pop_bool()?;
                     if !condition {
@@ -933,6 +909,7 @@ impl Vm {
                 Ok(TraceExecOutcome::Continue)
             }
             jit_native::STATUS_HALTED => Ok(TraceExecOutcome::Halted),
+            jit_native::STATUS_YIELDED => Ok(TraceExecOutcome::Yielded),
             jit_native::STATUS_ERROR => {
                 let err = jit_native::take_bridge_error().unwrap_or_else(|| {
                     VmError::JitNative("jit bridge reported failure without VmError".to_string())
@@ -1078,6 +1055,46 @@ impl Vm {
             return Err(VmError::InvalidShift(value));
         }
         Ok(value as u32)
+    }
+
+    fn execute_host_call(&mut self, index: u16, argc_u8: u8, call_ip: usize) -> VmResult<bool> {
+        let resolved_index = self.resolve_call_target(index, argc_u8)?;
+        let argc = argc_u8 as usize;
+        let mut args = Vec::with_capacity(argc);
+        for _ in 0..argc {
+            args.push(self.pop_value()?);
+        }
+        args.reverse();
+
+        self.call_depth += 1;
+        let function_ptr = self
+            .host_functions
+            .get_mut(resolved_index as usize)
+            .ok_or(VmError::InvalidCall(index))? as *mut VmHostFunction;
+        let outcome = unsafe {
+            match &mut *function_ptr {
+                VmHostFunction::Dynamic(function) => function.call(self, &args),
+                VmHostFunction::Static(function) => function(self, &args),
+            }
+        };
+        self.call_depth = self.call_depth.saturating_sub(1);
+        let outcome = outcome?;
+
+        match outcome {
+            CallOutcome::Return(values) => {
+                for value in values {
+                    self.stack.push(value);
+                }
+                Ok(false)
+            }
+            CallOutcome::Yield => {
+                for value in args {
+                    self.stack.push(value);
+                }
+                self.ip = call_ip;
+                Ok(true)
+            }
+        }
     }
 
     fn read_u8(&mut self) -> VmResult<u8> {

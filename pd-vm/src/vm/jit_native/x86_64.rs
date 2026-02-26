@@ -1,5 +1,7 @@
 use super::super::{Program, Value, Vm, VmError, VmResult};
-use super::{NativeBackend, STATUS_ERROR, STATUS_HALTED, STATUS_TRACE_EXIT};
+use super::{
+    NativeBackend, STATUS_CONTINUE, STATUS_ERROR, STATUS_HALTED, STATUS_TRACE_EXIT, STATUS_YIELDED,
+};
 use std::sync::OnceLock;
 
 pub(super) struct X86_64Backend;
@@ -183,6 +185,14 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
             }
             crate::jit::TraceStep::Stloc(index) => {
                 emit_native_step_stloc_inline(&mut code, layout, *index)?;
+                emit_native_status_check(&mut code, &mut jump_patches);
+            }
+            crate::jit::TraceStep::Call {
+                index,
+                argc,
+                call_ip,
+            } => {
+                emit_native_step_call_inline(&mut code, *index, *argc, *call_ip)?;
                 emit_native_status_check(&mut code, &mut jump_patches);
             }
             crate::jit::TraceStep::GuardFalse { exit_ip } => {
@@ -1289,6 +1299,45 @@ fn emit_native_step_ret_inline(code: &mut Vec<u8>) {
     code.extend_from_slice(&STATUS_HALTED.to_le_bytes());
 }
 
+fn emit_native_step_call_inline(
+    code: &mut Vec<u8>,
+    index: u16,
+    argc: u8,
+    call_ip: usize,
+) -> VmResult<()> {
+    let call_ip = u64::try_from(call_ip)
+        .map_err(|_| VmError::JitNative("trace call_ip exceeds 64-bit range".to_string()))?;
+    let helper_addr = jit_native_step_call as usize;
+    let helper_addr = u64::try_from(helper_addr).map_err(|_| {
+        VmError::JitNative("native helper pointer exceeds 64-bit range".to_string())
+    })?;
+
+    #[cfg(target_os = "windows")]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+        code.push(0xBA); // mov edx, imm32
+        code.extend_from_slice(&(index as u32).to_le_bytes());
+        code.extend_from_slice(&[0x41, 0xB8]); // mov r8d, imm32
+        code.extend_from_slice(&(argc as u32).to_le_bytes());
+        code.extend_from_slice(&[0x49, 0xB9]); // mov r9, imm64
+        code.extend_from_slice(&call_ip.to_le_bytes());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+        code.push(0xBE); // mov esi, imm32
+        code.extend_from_slice(&(index as u32).to_le_bytes());
+        code.push(0xBA); // mov edx, imm32
+        code.extend_from_slice(&(argc as u32).to_le_bytes());
+        code.extend_from_slice(&[0x48, 0xB9]); // mov rcx, imm64
+        code.extend_from_slice(&call_ip.to_le_bytes());
+    }
+    code.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
+    code.extend_from_slice(&helper_addr.to_le_bytes());
+    code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+    Ok(())
+}
+
 fn detect_vec_layout() -> VmResult<VecLayout> {
     let expected_size = std::mem::size_of::<[usize; 3]>();
     if std::mem::size_of::<Vec<Value>>() != expected_size {
@@ -1361,16 +1410,13 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     let bool_true_bytes = encode_value_bytes(Value::Bool(true));
     let string_a_bytes = encode_value_bytes(Value::String("a".to_string()));
     let string_b_bytes = encode_value_bytes(Value::String("b".to_string()));
-    let (tag_offset, tag_size) = detect_tag_layout(
-        &int_a_bytes,
-        &int_b_bytes,
-        &float_a_bytes,
-        &float_b_bytes,
-        &bool_false_bytes,
-        &bool_true_bytes,
-        &string_a_bytes,
-        &string_b_bytes,
-    )?;
+    let stable_tag_pairs = [
+        (&int_a_bytes[..], &int_b_bytes[..]),
+        (&float_a_bytes[..], &float_b_bytes[..]),
+        (&bool_false_bytes[..], &bool_true_bytes[..]),
+        (&string_a_bytes[..], &string_b_bytes[..]),
+    ];
+    let (tag_offset, tag_size) = detect_tag_layout(&stable_tag_pairs)?;
     let int_tag = decode_tag(&int_a_bytes, tag_offset, tag_size);
     let float_tag = decode_tag(&float_a_bytes, tag_offset, tag_size);
     let bool_tag = decode_tag(&bool_false_bytes, tag_offset, tag_size);
@@ -1456,39 +1502,45 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     })
 }
 
-fn detect_tag_layout(
-    int_a: &[u8],
-    int_b: &[u8],
-    float_a: &[u8],
-    float_b: &[u8],
-    bool_false: &[u8],
-    bool_true: &[u8],
-    string_a: &[u8],
-    string_b: &[u8],
-) -> VmResult<(usize, usize)> {
-    let size = int_a.len();
+fn detect_tag_layout(stable_pairs: &[(&[u8], &[u8])]) -> VmResult<(usize, usize)> {
+    if stable_pairs.len() < 2 {
+        return Err(VmError::JitNative(
+            "need at least two value variants to detect native tag layout".to_string(),
+        ));
+    }
+    let size = stable_pairs[0].0.len();
+    for (lhs, rhs) in stable_pairs {
+        if lhs.len() != size || rhs.len() != size {
+            return Err(VmError::JitNative(
+                "value byte probes must all have matching lengths".to_string(),
+            ));
+        }
+    }
+
     for tag_size in [1usize, 2, 4] {
         if tag_size > size {
             continue;
         }
         for offset in 0..=size - tag_size {
-            let int_slice = &int_a[offset..offset + tag_size];
-            if int_slice != &int_b[offset..offset + tag_size] {
-                continue;
+            let mut all_stable = true;
+            let mut first_tag_slice: Option<&[u8]> = None;
+            let mut all_equal_across_variants = true;
+            for (lhs, rhs) in stable_pairs {
+                let lhs_slice = &lhs[offset..offset + tag_size];
+                let rhs_slice = &rhs[offset..offset + tag_size];
+                if lhs_slice != rhs_slice {
+                    all_stable = false;
+                    break;
+                }
+                if let Some(first) = first_tag_slice {
+                    if lhs_slice != first {
+                        all_equal_across_variants = false;
+                    }
+                } else {
+                    first_tag_slice = Some(lhs_slice);
+                }
             }
-            let float_slice = &float_a[offset..offset + tag_size];
-            if float_slice != &float_b[offset..offset + tag_size] {
-                continue;
-            }
-            let bool_slice = &bool_false[offset..offset + tag_size];
-            if bool_slice != &bool_true[offset..offset + tag_size] {
-                continue;
-            }
-            let string_slice = &string_a[offset..offset + tag_size];
-            if string_slice != &string_b[offset..offset + tag_size] {
-                continue;
-            }
-            if int_slice == float_slice && int_slice == bool_slice && int_slice == string_slice {
+            if !all_stable || all_equal_across_variants {
                 continue;
             }
             return Ok((offset, tag_size));
@@ -1534,12 +1586,53 @@ fn emit_native_status_check(code: &mut Vec<u8>, patches: &mut Vec<usize>) {
     code.extend_from_slice(&[0, 0, 0, 0]);
 }
 
+thread_local! {
+    static JIT_BRIDGE_ERROR: std::cell::RefCell<Option<VmError>> = const { std::cell::RefCell::new(None) };
+}
+
 fn clear_bridge_error() {
-    // Native trace steps are emitted as machine code and no longer bridge through Rust helpers.
+    JIT_BRIDGE_ERROR.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }
 
 fn take_bridge_error() -> Option<VmError> {
-    None
+    JIT_BRIDGE_ERROR.with(|slot| slot.borrow_mut().take())
+}
+
+fn set_bridge_error(error: VmError) {
+    JIT_BRIDGE_ERROR.with(|slot| {
+        *slot.borrow_mut() = Some(error);
+    });
+}
+
+extern "C" fn jit_native_step_call(vm_ptr: *mut Vm, index: u16, argc: u8, call_ip: u64) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace call helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let call_ip = match usize::try_from(call_ip) {
+        Ok(value) => value,
+        Err(_) => {
+            set_bridge_error(VmError::JitNative(
+                "native trace call helper received out-of-range call ip".to_string(),
+            ));
+            return STATUS_ERROR;
+        }
+    };
+
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.execute_host_call(index, argc, call_ip) {
+        Ok(false) => STATUS_CONTINUE,
+        Ok(true) => STATUS_YIELDED,
+        Err(err) => {
+            set_bridge_error(err);
+            STATUS_ERROR
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1653,10 +1746,11 @@ fn free_executable_region(_ptr: *mut u8, _len: usize) -> VmResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::STATUS_CONTINUE;
+    use super::super::{STATUS_CONTINUE, STATUS_YIELDED};
     use super::*;
     use crate::jit::{JitTrace, JitTraceTerminal, TraceStep};
     use crate::vm::Program;
+    use crate::vm::{CallOutcome, HostFunction};
 
     type NativeEntry = unsafe extern "C" fn(*mut Vm) -> i32;
 
@@ -1665,6 +1759,7 @@ mod tests {
             id: 0,
             root_ip: 0,
             start_line: None,
+            has_call: false,
             steps: vec![step],
             terminal: JitTraceTerminal::LoopBack,
             executions: 0,
@@ -1680,6 +1775,33 @@ mod tests {
         let status = unsafe { entry(vm as *mut Vm) };
         drop(memory);
         Ok(status)
+    }
+
+    struct AddOneHost;
+
+    impl HostFunction for AddOneHost {
+        fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome> {
+            let value = match args.first() {
+                Some(Value::Int(value)) => *value,
+                _ => return Err(VmError::TypeMismatch("int")),
+            };
+            Ok(CallOutcome::Return(vec![Value::Int(value + 1)]))
+        }
+    }
+
+    struct YieldOnceHost {
+        yielded: bool,
+    }
+
+    impl HostFunction for YieldOnceHost {
+        fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> VmResult<CallOutcome> {
+            if !self.yielded {
+                self.yielded = true;
+                Ok(CallOutcome::Yield)
+            } else {
+                Ok(CallOutcome::Return(Vec::new()))
+            }
+        }
     }
 
     #[test]
@@ -1751,6 +1873,72 @@ mod tests {
                 step, code
             );
         }
+    }
+
+    #[test]
+    fn call_step_emits_helper_call() {
+        let trace = build_single_step_trace(TraceStep::Call {
+            index: 0,
+            argc: 1,
+            call_ip: 0,
+        });
+        let code = emit_native_trace_bytes(&trace).expect("native call trace should compile");
+        let call_count = code
+            .windows(2)
+            .filter(|window| *window == [0xFF, 0xD0])
+            .count();
+        assert!(
+            call_count >= 1,
+            "call step should emit at least one helper call, code bytes: {:02X?}",
+            code
+        );
+    }
+
+    #[test]
+    fn call_step_bridge_executes_host_function_and_continues() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.register_function(Box::new(AddOneHost));
+        vm.stack.push(Value::Int(41));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: 0,
+                argc: 1,
+                call_ip: 0,
+            },
+        )
+        .expect("native call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::Int(42)]);
+        assert!(
+            take_bridge_error().is_none(),
+            "successful call bridge should not set bridge error"
+        );
+    }
+
+    #[test]
+    fn call_step_bridge_propagates_yield_status() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.register_function(Box::new(YieldOnceHost { yielded: false }));
+        vm.stack.push(Value::Int(9));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: 0,
+                argc: 1,
+                call_ip: 0,
+            },
+        )
+        .expect("native call should run");
+        assert_eq!(status, STATUS_YIELDED);
+        assert_eq!(vm.stack(), &[Value::Int(9)]);
+        assert_eq!(vm.ip(), 0);
+        assert!(
+            take_bridge_error().is_none(),
+            "yielding call bridge should not set bridge error"
+        );
     }
 
     #[test]

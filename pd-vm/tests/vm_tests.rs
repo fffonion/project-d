@@ -898,7 +898,7 @@ fn compiler_uses_shl_for_power_of_two_multiply_and_jit_accepts_it() {
 }
 
 #[test]
-fn trace_jit_reports_nyi_for_host_calls() {
+fn trace_jit_supports_host_calls_with_native_mixed_mode() {
     let source = r#"
         fn print(x);
         let i = 0;
@@ -934,9 +934,24 @@ fn trace_jit_reports_nyi_for_host_calls() {
             snapshot
                 .attempts
                 .iter()
-                .any(|attempt| matches!(attempt.result, Err(vm::JitNyiReason::HostCall))),
-            "expected HostCall NYI, dump:\n{dump}"
+                .any(|attempt| attempt.result.is_ok()),
+            "expected at least one successful trace compile, dump:\n{dump}"
         );
-        assert!(dump.contains("opcode call is NYI in trace JIT"));
+        assert!(
+            snapshot.traces.iter().any(|trace| trace.has_call),
+            "expected at least one call-containing trace, dump:\n{dump}"
+        );
+        assert!(
+            dump.contains(" call"),
+            "expected trace dump to include call"
+        );
+        assert!(
+            vm.jit_native_trace_count() > 0,
+            "expected call trace to compile to native code"
+        );
+        assert!(
+            vm.jit_native_exec_count() > 0,
+            "expected native call trace to execute at least once"
+        );
     }
 }
