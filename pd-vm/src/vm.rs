@@ -32,6 +32,12 @@ pub enum VmError {
     InvalidConstant(u32),
     InvalidLocal(u8),
     InvalidCall(u16),
+    InvalidCallArity {
+        import: String,
+        expected: u8,
+        got: u8,
+    },
+    UnboundImport(String),
     InvalidOpcode(u8),
     BytecodeBounds,
     HostError(String),
@@ -50,6 +56,15 @@ impl std::fmt::Display for VmError {
             VmError::InvalidConstant(index) => write!(f, "invalid constant {index}"),
             VmError::InvalidLocal(index) => write!(f, "invalid local {index}"),
             VmError::InvalidCall(index) => write!(f, "invalid call target {index}"),
+            VmError::InvalidCallArity {
+                import,
+                expected,
+                got,
+            } => write!(
+                f,
+                "invalid call arity for import '{import}': expected {expected}, got {got}",
+            ),
+            VmError::UnboundImport(name) => write!(f, "unbound host import '{name}'"),
             VmError::InvalidOpcode(opcode) => write!(f, "invalid opcode {opcode}"),
             VmError::BytecodeBounds => write!(f, "bytecode bounds"),
             VmError::HostError(message) => write!(f, "host error: {message}"),
@@ -62,10 +77,17 @@ impl std::error::Error for VmError {}
 
 pub type VmResult<T> = Result<T, VmError>;
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct HostImport {
+    pub name: String,
+    pub arity: u8,
+}
+
 #[derive(Clone, Debug)]
 pub struct Program {
     pub constants: Vec<Value>,
     pub code: Vec<u8>,
+    pub imports: Vec<HostImport>,
     pub debug: Option<crate::debug::DebugInfo>,
 }
 
@@ -74,6 +96,7 @@ impl Program {
         Self {
             constants,
             code,
+            imports: Vec::new(),
             debug: None,
         }
     }
@@ -86,6 +109,21 @@ impl Program {
         Self {
             constants,
             code,
+            imports: Vec::new(),
+            debug,
+        }
+    }
+
+    pub fn with_imports_and_debug(
+        constants: Vec<Value>,
+        code: Vec<u8>,
+        imports: Vec<HostImport>,
+        debug: Option<crate::debug::DebugInfo>,
+    ) -> Self {
+        Self {
+            constants,
+            code,
+            imports,
             debug,
         }
     }
@@ -185,12 +223,201 @@ pub trait HostFunction {
     fn call(&mut self, vm: &mut Vm, args: &[Value]) -> VmResult<CallOutcome>;
 }
 
+pub type StaticHostFunction = fn(&mut Vm, &[Value]) -> VmResult<CallOutcome>;
+
+type HostFactory = dyn Fn() -> Box<dyn HostFunction> + Send + Sync;
+
+enum RegistryEntryKind {
+    Factory(Box<HostFactory>),
+    Static(StaticHostFunction),
+}
+
+struct RegistryEntry {
+    arity: u8,
+    kind: RegistryEntryKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostBindingPlan {
+    import_signature: Vec<HostImport>,
+    registry_slots: Vec<u16>,
+    resolved_calls: Vec<u16>,
+}
+
+pub struct HostFunctionRegistry {
+    entries: Vec<RegistryEntry>,
+    by_name: HashMap<String, u16>,
+    plan_cache: HashMap<Vec<HostImport>, HostBindingPlan>,
+}
+
+impl Default for HostFunctionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl HostFunctionRegistry {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            by_name: HashMap::new(),
+            plan_cache: HashMap::new(),
+        }
+    }
+
+    pub fn register<F>(&mut self, name: impl Into<String>, arity: u8, factory: F)
+    where
+        F: Fn() -> Box<dyn HostFunction> + Send + Sync + 'static,
+    {
+        let name = name.into();
+        if let Some(&slot) = self.by_name.get(&name)
+            && let Some(entry) = self.entries.get_mut(slot as usize)
+        {
+            entry.arity = arity;
+            entry.kind = RegistryEntryKind::Factory(Box::new(factory));
+            self.plan_cache.clear();
+            return;
+        }
+
+        let slot = self.entries.len() as u16;
+        self.entries.push(RegistryEntry {
+            arity,
+            kind: RegistryEntryKind::Factory(Box::new(factory)),
+        });
+        self.by_name.insert(name, slot);
+        self.plan_cache.clear();
+    }
+
+    pub fn register_static(
+        &mut self,
+        name: impl Into<String>,
+        arity: u8,
+        function: StaticHostFunction,
+    ) {
+        let name = name.into();
+        if let Some(&slot) = self.by_name.get(&name)
+            && let Some(entry) = self.entries.get_mut(slot as usize)
+        {
+            entry.arity = arity;
+            entry.kind = RegistryEntryKind::Static(function);
+            self.plan_cache.clear();
+            return;
+        }
+
+        let slot = self.entries.len() as u16;
+        self.entries.push(RegistryEntry {
+            arity,
+            kind: RegistryEntryKind::Static(function),
+        });
+        self.by_name.insert(name, slot);
+        self.plan_cache.clear();
+    }
+
+    pub fn bind_vm_cached(&mut self, vm: &mut Vm) -> VmResult<()> {
+        let plan = self.prepare_plan(&vm.program.imports)?;
+        self.bind_vm_with_plan(vm, &plan)
+    }
+
+    pub fn prepare_plan(&mut self, imports: &[HostImport]) -> VmResult<HostBindingPlan> {
+        self.plan_for_imports(imports).cloned()
+    }
+
+    fn plan_for_imports(&mut self, imports: &[HostImport]) -> VmResult<&HostBindingPlan> {
+        if !self.plan_cache.contains_key(imports) {
+            let mut registry_slot_to_vm_slot: HashMap<u16, u16> = HashMap::new();
+            let mut registry_slots = Vec::new();
+            let mut resolved_calls = Vec::with_capacity(imports.len());
+
+            for import in imports {
+                let registry_slot = self
+                    .by_name
+                    .get(&import.name)
+                    .copied()
+                    .ok_or_else(|| VmError::UnboundImport(import.name.clone()))?;
+                let entry = self
+                    .entries
+                    .get(registry_slot as usize)
+                    .ok_or(VmError::InvalidCall(registry_slot))?;
+                if entry.arity != import.arity {
+                    return Err(VmError::InvalidCallArity {
+                        import: import.name.clone(),
+                        expected: entry.arity,
+                        got: import.arity,
+                    });
+                }
+
+                let vm_slot = if let Some(&existing) = registry_slot_to_vm_slot.get(&registry_slot)
+                {
+                    existing
+                } else {
+                    let slot = registry_slots.len() as u16;
+                    registry_slots.push(registry_slot);
+                    registry_slot_to_vm_slot.insert(registry_slot, slot);
+                    slot
+                };
+                resolved_calls.push(vm_slot);
+            }
+
+            self.plan_cache.insert(
+                imports.to_vec(),
+                HostBindingPlan {
+                    import_signature: imports.to_vec(),
+                    registry_slots,
+                    resolved_calls,
+                },
+            );
+        }
+
+        self.plan_cache
+            .get(imports)
+            .ok_or_else(|| VmError::HostError("host binding plan cache lookup failed".to_string()))
+    }
+
+    pub fn bind_vm_with_plan(&self, vm: &mut Vm, plan: &HostBindingPlan) -> VmResult<()> {
+        if vm.program.imports != plan.import_signature {
+            return Err(VmError::HostError(
+                "host binding plan does not match vm import signature".to_string(),
+            ));
+        }
+        if !vm.host_functions.is_empty() || !vm.host_function_symbols.is_empty() {
+            return Err(VmError::HostError(
+                "host binding cache requires an unbound vm".to_string(),
+            ));
+        }
+
+        for &registry_slot in &plan.registry_slots {
+            let entry = self
+                .entries
+                .get(registry_slot as usize)
+                .ok_or(VmError::InvalidCall(registry_slot))?;
+            match &entry.kind {
+                RegistryEntryKind::Factory(factory) => {
+                    vm.register_function(factory());
+                }
+                RegistryEntryKind::Static(function) => {
+                    vm.register_static_function(*function);
+                }
+            }
+        }
+        vm.install_resolved_calls(plan.resolved_calls.clone())?;
+        Ok(())
+    }
+}
+
+enum VmHostFunction {
+    Dynamic(Box<dyn HostFunction>),
+    Static(StaticHostFunction),
+}
+
 pub struct Vm {
     program: Program,
     ip: usize,
     stack: Vec<Value>,
     locals: Vec<Value>,
-    host_functions: Vec<Box<dyn HostFunction>>,
+    host_functions: Vec<VmHostFunction>,
+    host_function_symbols: HashMap<String, u16>,
+    resolved_calls: Vec<u16>,
+    resolved_calls_dirty: bool,
     call_depth: usize,
     jit: crate::jit::TraceJitEngine,
     native_traces: HashMap<usize, NativeTrace>,
@@ -233,6 +460,9 @@ impl Vm {
             stack: Vec::new(),
             locals: Vec::new(),
             host_functions: Vec::new(),
+            host_function_symbols: HashMap::new(),
+            resolved_calls: Vec::new(),
+            resolved_calls_dirty: true,
             call_depth: 0,
             jit: crate::jit::TraceJitEngine::default(),
             native_traces: HashMap::new(),
@@ -247,6 +477,9 @@ impl Vm {
             stack: Vec::new(),
             locals: vec![Value::Int(0); local_count],
             host_functions: Vec::new(),
+            host_function_symbols: HashMap::new(),
+            resolved_calls: Vec::new(),
+            resolved_calls_dirty: true,
             call_depth: 0,
             jit: crate::jit::TraceJitEngine::default(),
             native_traces: HashMap::new(),
@@ -256,8 +489,46 @@ impl Vm {
 
     pub fn register_function(&mut self, function: Box<dyn HostFunction>) -> u16 {
         let index = self.host_functions.len() as u16;
-        self.host_functions.push(function);
+        self.host_functions.push(VmHostFunction::Dynamic(function));
+        self.resolved_calls_dirty = true;
         index
+    }
+
+    pub fn register_static_function(&mut self, function: StaticHostFunction) -> u16 {
+        let index = self.host_functions.len() as u16;
+        self.host_functions.push(VmHostFunction::Static(function));
+        self.resolved_calls_dirty = true;
+        index
+    }
+
+    pub fn bind_function(&mut self, name: impl Into<String>, function: Box<dyn HostFunction>) {
+        let name = name.into();
+        if let Some(&index) = self.host_function_symbols.get(&name)
+            && let Some(slot) = self.host_functions.get_mut(index as usize)
+        {
+            *slot = VmHostFunction::Dynamic(function);
+            self.resolved_calls_dirty = true;
+            return;
+        }
+
+        let index = self.register_function(function);
+        self.host_function_symbols.insert(name, index);
+        self.resolved_calls_dirty = true;
+    }
+
+    pub fn bind_static_function(&mut self, name: impl Into<String>, function: StaticHostFunction) {
+        let name = name.into();
+        if let Some(&index) = self.host_function_symbols.get(&name)
+            && let Some(slot) = self.host_functions.get_mut(index as usize)
+        {
+            *slot = VmHostFunction::Static(function);
+            self.resolved_calls_dirty = true;
+            return;
+        }
+
+        let index = self.register_static_function(function);
+        self.host_function_symbols.insert(name, index);
+        self.resolved_calls_dirty = true;
     }
 
     pub fn run(&mut self) -> VmResult<VmStatus> {
@@ -320,6 +591,7 @@ impl Vm {
         mut debugger: Option<&mut crate::debugger::Debugger>,
         allow_jit: bool,
     ) -> VmResult<VmStatus> {
+        self.ensure_call_bindings()?;
         loop {
             if let Some(active_debugger) = debugger.as_deref_mut() {
                 active_debugger.on_instruction(self);
@@ -456,22 +728,29 @@ impl Vm {
             x if x == OpCode::Call as u8 => {
                 let call_ip = self.ip - 1;
                 let index = self.read_u16()?;
-                let argc = self.read_u8()? as usize;
+                let argc_u8 = self.read_u8()?;
+                let argc = argc_u8 as usize;
                 let mut args = Vec::with_capacity(argc);
                 for _ in 0..argc {
                     args.push(self.pop_value()?);
                 }
                 args.reverse();
 
+                let resolved_index = self.resolve_call_target(index, argc_u8)?;
                 self.call_depth += 1;
 
                 let function_ptr = self
                     .host_functions
-                    .get_mut(index as usize)
+                    .get_mut(resolved_index as usize)
                     .ok_or(VmError::InvalidCall(index))?
-                    as *mut Box<dyn HostFunction>;
+                    as *mut VmHostFunction;
 
-                let outcome = unsafe { (*function_ptr).call(self, &args)? };
+                let outcome = unsafe {
+                    match &mut *function_ptr {
+                        VmHostFunction::Dynamic(function) => function.call(self, &args)?,
+                        VmHostFunction::Static(function) => function(self, &args)?,
+                    }
+                };
                 self.call_depth = self.call_depth.saturating_sub(1);
 
                 match outcome {
@@ -759,6 +1038,78 @@ impl Vm {
         }
         self.ip = target;
         Ok(())
+    }
+
+    fn install_resolved_calls(&mut self, resolved_calls: Vec<u16>) -> VmResult<()> {
+        if self.program.imports.len() != resolved_calls.len() {
+            return Err(VmError::HostError(format!(
+                "resolved call cache size mismatch: expected {}, got {}",
+                self.program.imports.len(),
+                resolved_calls.len()
+            )));
+        }
+        for &index in &resolved_calls {
+            if index as usize >= self.host_functions.len() {
+                return Err(VmError::InvalidCall(index));
+            }
+        }
+        self.resolved_calls = resolved_calls;
+        self.resolved_calls_dirty = false;
+        Ok(())
+    }
+
+    fn ensure_call_bindings(&mut self) -> VmResult<()> {
+        if self.program.imports.is_empty() || !self.resolved_calls_dirty {
+            return Ok(());
+        }
+
+        let use_legacy_order = self.host_function_symbols.is_empty();
+        let mut resolved = Vec::with_capacity(self.program.imports.len());
+        for (index, import) in self.program.imports.iter().enumerate() {
+            if use_legacy_order {
+                if index >= self.host_functions.len() {
+                    return Err(VmError::InvalidCall(index as u16));
+                }
+                resolved.push(index as u16);
+                continue;
+            }
+
+            let bound = self
+                .host_function_symbols
+                .get(&import.name)
+                .copied()
+                .ok_or_else(|| VmError::UnboundImport(import.name.clone()))?;
+            resolved.push(bound);
+        }
+
+        self.resolved_calls = resolved;
+        self.resolved_calls_dirty = false;
+        Ok(())
+    }
+
+    fn resolve_call_target(&mut self, index: u16, argc: u8) -> VmResult<u16> {
+        if self.program.imports.is_empty() {
+            return Ok(index);
+        }
+
+        self.ensure_call_bindings()?;
+        let import = self
+            .program
+            .imports
+            .get(index as usize)
+            .ok_or(VmError::InvalidCall(index))?;
+        if import.arity != argc {
+            return Err(VmError::InvalidCallArity {
+                import: import.name.clone(),
+                expected: import.arity,
+                got: argc,
+            });
+        }
+
+        self.resolved_calls
+            .get(index as usize)
+            .copied()
+            .ok_or(VmError::InvalidCall(index))
     }
 }
 

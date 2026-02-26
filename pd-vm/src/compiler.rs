@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use crate::assembler::{Assembler, AssemblerError};
-use crate::vm::{Program, Value, Vm};
+use crate::vm::{HostImport, Program, Value, Vm};
 
 #[derive(Debug)]
 pub enum CompileError {
@@ -2186,9 +2186,17 @@ pub fn compile_source_with_flavor(
     for (name, index) in parsed.local_bindings {
         compiler.add_local_debug(name, index);
     }
-    let program = compiler
+    let mut program = compiler
         .compile_program(&parsed.stmts)
         .map_err(SourceError::Compile)?;
+    program.imports = parsed
+        .functions
+        .iter()
+        .map(|func| HostImport {
+            name: func.name.clone(),
+            arity: func.arity,
+        })
+        .collect();
     Ok(CompiledProgram {
         program,
         locals: parsed.locals,

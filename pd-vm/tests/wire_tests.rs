@@ -1,18 +1,22 @@
 use vm::{
-    ArgInfo, BytecodeBuilder, DebugFunction, DebugInfo, LineInfo, LocalInfo, Program,
+    ArgInfo, BytecodeBuilder, DebugFunction, DebugInfo, HostImport, LineInfo, LocalInfo, Program,
     ValidationError, Value, WireError, decode_program, encode_program, infer_local_count,
     validate_program,
 };
 
 #[test]
 fn wire_roundtrip_preserves_constants_and_code() {
-    let program = Program::with_debug(
+    let program = Program::with_imports_and_debug(
         vec![
             Value::Int(42),
             Value::Bool(true),
             Value::String("hello".to_string()),
         ],
         vec![0x00, 0x01, 0x02],
+        vec![HostImport {
+            name: "print".to_string(),
+            arity: 1,
+        }],
         Some(DebugInfo {
             source: Some("fn a(x);\na(1);".to_string()),
             lines: vec![
@@ -38,6 +42,7 @@ fn wire_roundtrip_preserves_constants_and_code() {
 
     assert_eq!(decoded.constants, program.constants);
     assert_eq!(decoded.code, program.code);
+    assert_eq!(decoded.imports, program.imports);
     assert_eq!(decoded.debug, program.debug);
 }
 
@@ -101,8 +106,42 @@ fn validate_accepts_known_good_program() {
     bc.call(0, 1);
     bc.ret();
 
-    let program = Program::new(vec![Value::String("x".to_string())], bc.finish());
+    let program = Program::with_imports_and_debug(
+        vec![Value::String("x".to_string())],
+        bc.finish(),
+        vec![HostImport {
+            name: "print".to_string(),
+            arity: 1,
+        }],
+        None,
+    );
     validate_program(&program, 4).expect("program should validate");
+}
+
+#[test]
+fn validate_rejects_invalid_call_arity_for_import() {
+    let mut bc = BytecodeBuilder::new();
+    bc.call(0, 2);
+    bc.ret();
+
+    let program = Program::with_imports_and_debug(
+        vec![],
+        bc.finish(),
+        vec![HostImport {
+            name: "print".to_string(),
+            arity: 1,
+        }],
+        None,
+    );
+    assert!(matches!(
+        validate_program(&program, 4),
+        Err(ValidationError::InvalidCallArity {
+            index: 0,
+            expected: 1,
+            got: 2,
+            ..
+        })
+    ));
 }
 
 #[test]

@@ -1,7 +1,24 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use vm::{JitConfig, OpCode, Program, Value, Vm, VmStatus, compile_source};
+use vm::{
+    CallOutcome, HostFunction, HostFunctionRegistry, JitConfig, OpCode, Program, Value, Vm,
+    VmStatus, compile_source,
+};
+
+struct PerfNoopHost {
+    _marker: u64,
+}
+
+impl HostFunction for PerfNoopHost {
+    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> Result<CallOutcome, vm::VmError> {
+        Ok(CallOutcome::Return(Vec::new()))
+    }
+}
+
+fn perf_noop_host_static(_vm: &mut Vm, _args: &[Value]) -> Result<CallOutcome, vm::VmError> {
+    Ok(CallOutcome::Return(Vec::new()))
+}
 
 #[test]
 #[ignore = "performance characterization test; run manually"]
@@ -69,6 +86,131 @@ fn perf_vm_creation_cleanup_speed_and_ram_usage() {
         "vm retained batch after drop",
         retained_rss_after,
         retained_rss_after_drop,
+    );
+
+    let host_import_count = 32usize;
+    let host_iterations = 6_000usize;
+    let host_source = build_host_import_stress_source(host_import_count);
+    let host_compiled = compile_source(&host_source).expect("host import compile should succeed");
+    let host_names: Vec<String> = host_compiled
+        .functions
+        .iter()
+        .map(|func| func.name.clone())
+        .collect();
+    assert_eq!(host_names.len(), host_import_count);
+
+    let plain_compiled = compile_source("let v = 1; v;").expect("plain compile should succeed");
+
+    let plain_rss_before = current_rss_bytes();
+    let plain_started = Instant::now();
+    for _ in 0..host_iterations {
+        let mut vm = Vm::with_locals(plain_compiled.program.clone(), plain_compiled.locals);
+        let status = vm.run().expect("plain vm run should succeed");
+        assert_eq!(status, VmStatus::Halted);
+        black_box(vm.stack());
+    }
+    let plain_elapsed = plain_started.elapsed();
+    let plain_rss_after = current_rss_bytes();
+    print_rss_delta(
+        "host overhead baseline (plain run)",
+        plain_rss_before,
+        plain_rss_after,
+    );
+
+    let host_rss_before = current_rss_bytes();
+    let host_started = Instant::now();
+    for _ in 0..host_iterations {
+        let mut vm = Vm::with_locals(host_compiled.program.clone(), host_compiled.locals);
+        for name in &host_names {
+            vm.bind_function(name, Box::new(PerfNoopHost { _marker: 0 }));
+        }
+        let status = vm.run().expect("host import vm run should succeed");
+        assert_eq!(status, VmStatus::Halted);
+        black_box(vm.stack());
+    }
+    let host_elapsed = host_started.elapsed();
+    let host_rss_after = current_rss_bytes();
+    print_rss_delta(
+        "host overhead (bind + import load)",
+        host_rss_before,
+        host_rss_after,
+    );
+
+    let plain_per_vm_ns = plain_elapsed.as_nanos() / host_iterations as u128;
+    let host_per_vm_ns = host_elapsed.as_nanos() / host_iterations as u128;
+    let overhead_per_vm_ns = host_per_vm_ns.saturating_sub(plain_per_vm_ns);
+    let overhead_per_import_ns = overhead_per_vm_ns / host_import_count as u128;
+    println!(
+        "host register/load overhead: iterations={host_iterations}, imports_per_vm={host_import_count}, plain_per_vm_ns={plain_per_vm_ns}, host_per_vm_ns={host_per_vm_ns}, overhead_per_vm_ns={overhead_per_vm_ns}, overhead_per_import_ns={overhead_per_import_ns}",
+    );
+
+    let mut registry = HostFunctionRegistry::new();
+    for name in &host_names {
+        registry.register(name.clone(), 1, || Box::new(PerfNoopHost { _marker: 0 }));
+    }
+    let cached_plan = registry
+        .prepare_plan(&host_compiled.program.imports)
+        .expect("cached host plan should build");
+
+    let cached_rss_before = current_rss_bytes();
+    let cached_started = Instant::now();
+    for _ in 0..host_iterations {
+        let mut vm = Vm::with_locals(host_compiled.program.clone(), host_compiled.locals);
+        registry
+            .bind_vm_with_plan(&mut vm, &cached_plan)
+            .expect("cached host binding should succeed");
+        let status = vm.run().expect("cached host import vm run should succeed");
+        assert_eq!(status, VmStatus::Halted);
+        black_box(vm.stack());
+    }
+    let cached_elapsed = cached_started.elapsed();
+    let cached_rss_after = current_rss_bytes();
+    print_rss_delta(
+        "host overhead (cached bind + cached import load)",
+        cached_rss_before,
+        cached_rss_after,
+    );
+
+    let cached_per_vm_ns = cached_elapsed.as_nanos() / host_iterations as u128;
+    let cached_overhead_per_vm_ns = cached_per_vm_ns.saturating_sub(plain_per_vm_ns);
+    let cached_overhead_per_import_ns = cached_overhead_per_vm_ns / host_import_count as u128;
+    println!(
+        "host cache overhead: iterations={host_iterations}, imports_per_vm={host_import_count}, plain_per_vm_ns={plain_per_vm_ns}, cached_per_vm_ns={cached_per_vm_ns}, overhead_per_vm_ns={cached_overhead_per_vm_ns}, overhead_per_import_ns={cached_overhead_per_import_ns}",
+    );
+
+    let mut static_registry = HostFunctionRegistry::new();
+    for name in &host_names {
+        static_registry.register_static(name.clone(), 1, perf_noop_host_static);
+    }
+    let static_cached_plan = static_registry
+        .prepare_plan(&host_compiled.program.imports)
+        .expect("static host plan should build");
+
+    let static_cached_rss_before = current_rss_bytes();
+    let static_cached_started = Instant::now();
+    for _ in 0..host_iterations {
+        let mut vm = Vm::with_locals(host_compiled.program.clone(), host_compiled.locals);
+        static_registry
+            .bind_vm_with_plan(&mut vm, &static_cached_plan)
+            .expect("cached static host binding should succeed");
+        let status = vm.run().expect("cached static host vm run should succeed");
+        assert_eq!(status, VmStatus::Halted);
+        black_box(vm.stack());
+    }
+    let static_cached_elapsed = static_cached_started.elapsed();
+    let static_cached_rss_after = current_rss_bytes();
+    print_rss_delta(
+        "host overhead (cached static fn ptr)",
+        static_cached_rss_before,
+        static_cached_rss_after,
+    );
+
+    let static_cached_per_vm_ns = static_cached_elapsed.as_nanos() / host_iterations as u128;
+    let static_cached_overhead_per_vm_ns = static_cached_per_vm_ns.saturating_sub(plain_per_vm_ns);
+    let static_cached_overhead_per_import_ns =
+        static_cached_overhead_per_vm_ns / host_import_count as u128;
+    println!(
+        "host static fn ptr overhead: iterations={host_iterations}, imports_per_vm={host_import_count}, plain_per_vm_ns={plain_per_vm_ns}, static_cached_per_vm_ns={static_cached_per_vm_ns}, overhead_per_vm_ns={static_cached_overhead_per_vm_ns}, overhead_per_import_ns={static_cached_overhead_per_import_ns}",
     );
 }
 
@@ -261,6 +403,16 @@ fn build_compiler_stress_source(line_count: usize) -> String {
         source.push_str("sum = sum + 1;\n");
     }
     source.push_str("sum;\n");
+    source
+}
+
+fn build_host_import_stress_source(import_count: usize) -> String {
+    let mut source = String::new();
+    for index in 0..import_count {
+        source.push_str(&format!("fn host_{index}(x);\n"));
+    }
+    source.push_str("let v = 1;\n");
+    source.push_str("v;\n");
     source
 }
 

@@ -1,13 +1,14 @@
 use std::collections::HashSet;
 
 use crate::debug::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
-use crate::vm::{OpCode, Program, Value};
+use crate::vm::{HostImport, OpCode, Program, Value};
 
 const MAGIC: [u8; 4] = *b"VMBC";
 const VERSION_V1: u16 = 1;
 const VERSION_V2: u16 = 2;
 const VERSION_V3: u16 = 3;
-const ENCODE_VERSION: u16 = VERSION_V3;
+const VERSION_V4: u16 = 4;
+const ENCODE_VERSION: u16 = VERSION_V4;
 const FLAGS: u16 = 0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,6 +71,12 @@ pub enum ValidationError {
         offset: usize,
         index: u16,
     },
+    InvalidCallArity {
+        offset: usize,
+        index: u16,
+        expected: u8,
+        got: u8,
+    },
     InvalidJumpTarget {
         offset: usize,
         target: u32,
@@ -97,6 +104,15 @@ impl std::fmt::Display for ValidationError {
             ValidationError::InvalidCall { offset, index } => {
                 write!(f, "invalid call index {index} at offset {offset}")
             }
+            ValidationError::InvalidCallArity {
+                offset,
+                index,
+                expected,
+                got,
+            } => write!(
+                f,
+                "invalid call arity {got} for import index {index} at offset {offset}, expected {expected}",
+            ),
             ValidationError::InvalidJumpTarget { offset, target } => write!(
                 f,
                 "invalid jump target {target} referenced by instruction at offset {offset}",
@@ -135,6 +151,14 @@ pub fn encode_program(program: &Program) -> Result<Vec<u8>, WireError> {
     write_u32_len("code", program.code.len(), &mut out)?;
     out.extend_from_slice(&program.code);
 
+    if ENCODE_VERSION >= VERSION_V4 {
+        write_u32_count("imports", program.imports.len(), &mut out)?;
+        for import in &program.imports {
+            write_string("import name", &import.name, &mut out)?;
+            out.push(import.arity);
+        }
+    }
+
     if ENCODE_VERSION >= VERSION_V2 {
         write_debug_info(&mut out, program.debug.as_ref())?;
     }
@@ -151,7 +175,11 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, WireError> {
     }
 
     let version = cursor.read_u16()?;
-    if version != VERSION_V1 && version != VERSION_V2 && version != VERSION_V3 {
+    if version != VERSION_V1
+        && version != VERSION_V2
+        && version != VERSION_V3
+        && version != VERSION_V4
+    {
         return Err(WireError::UnsupportedVersion(version));
     }
 
@@ -188,6 +216,19 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, WireError> {
 
     let code_len = cursor.read_u32()? as usize;
     let code = cursor.read_exact(code_len)?.to_vec();
+    let imports = if version >= VERSION_V4 {
+        let import_count = cursor.read_u32()? as usize;
+        let mut imports = Vec::with_capacity(import_count);
+        for _ in 0..import_count {
+            imports.push(HostImport {
+                name: cursor.read_string()?,
+                arity: cursor.read_u8()?,
+            });
+        }
+        imports
+    } else {
+        Vec::new()
+    };
     let debug = if version >= VERSION_V2 {
         read_debug_info(&mut cursor, version)?
     } else {
@@ -198,7 +239,9 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, WireError> {
         return Err(WireError::TrailingBytes);
     }
 
-    Ok(Program::with_debug(constants, code, debug))
+    Ok(Program::with_imports_and_debug(
+        constants, code, imports, debug,
+    ))
 }
 
 pub fn validate_program(program: &Program, host_fn_count: u16) -> Result<(), ValidationError> {
@@ -282,18 +325,35 @@ fn analyze_program(
                     opcode,
                     expected_bytes: 3,
                 })?;
-                read_u8(code, &mut ip).ok_or(ValidationError::TruncatedOperand {
+                let argc = read_u8(code, &mut ip).ok_or(ValidationError::TruncatedOperand {
                     offset: start,
                     opcode,
                     expected_bytes: 3,
                 })?;
-                if let Some(host_fn_count) = host_fn_count
-                    && index >= host_fn_count
-                {
-                    return Err(ValidationError::InvalidCall {
-                        offset: start,
-                        index,
-                    });
+                if program.imports.is_empty() {
+                    if let Some(host_fn_count) = host_fn_count
+                        && index >= host_fn_count
+                    {
+                        return Err(ValidationError::InvalidCall {
+                            offset: start,
+                            index,
+                        });
+                    }
+                } else {
+                    let Some(import) = program.imports.get(index as usize) else {
+                        return Err(ValidationError::InvalidCall {
+                            offset: start,
+                            index,
+                        });
+                    };
+                    if argc != import.arity {
+                        return Err(ValidationError::InvalidCallArity {
+                            offset: start,
+                            index,
+                            expected: import.arity,
+                            got: argc,
+                        });
+                    }
                 }
             }
             other => {

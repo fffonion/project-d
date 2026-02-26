@@ -18,7 +18,10 @@ pub use jit::{
     JitAttempt, JitConfig, JitNyiDoc, JitNyiReason, JitSnapshot, JitTrace, JitTraceTerminal,
     TraceJitEngine,
 };
-pub use vm::{CallOutcome, HostFunction, OpCode, Program, Value, Vm, VmError, VmResult, VmStatus};
+pub use vm::{
+    CallOutcome, HostBindingPlan, HostFunction, HostFunctionRegistry, HostImport, OpCode, Program,
+    StaticHostFunction, Value, Vm, VmError, VmResult, VmStatus,
+};
 pub use wire::{
     ValidationError, WireError, decode_program, encode_program, infer_local_count, validate_program,
 };

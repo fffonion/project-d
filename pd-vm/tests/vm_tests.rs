@@ -1,6 +1,6 @@
 use vm::{
-    Assembler, BytecodeBuilder, CallOutcome, Compiler, Expr, HostFunction, JitConfig, OpCode,
-    Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source,
+    Assembler, BytecodeBuilder, CallOutcome, Compiler, Expr, HostFunction, HostFunctionRegistry,
+    JitConfig, OpCode, Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source,
     compile_source_file, compile_source_with_flavor,
 };
 
@@ -267,6 +267,14 @@ impl HostFunction for PrintNoReturn {
     }
 }
 
+fn static_add_one(_vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
+    let value = match args.first() {
+        Some(Value::Int(value)) => *value,
+        _ => 0,
+    };
+    Ok(CallOutcome::Return(vec![Value::Int(value + 1)]))
+}
+
 #[test]
 fn compile_source_with_functions() {
     let source = include_str!("../examples/example.rss");
@@ -286,6 +294,106 @@ fn compile_source_with_functions() {
 
     assert_eq!(status, VmStatus::Halted);
     assert_eq!(vm.stack(), &[Value::Int(6)]);
+}
+
+#[test]
+fn compile_source_resolves_imports_by_name_not_registration_order() {
+    let source = include_str!("../examples/example.rss");
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    vm.bind_function("print", Box::new(PrintBuiltin));
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(6)]);
+}
+
+#[test]
+fn run_fails_when_import_is_unbound() {
+    let source = r#"
+        fn add_one(x);
+        add_one(41);
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("print", Box::new(PrintBuiltin));
+
+    let err = vm.run().expect_err("missing import should fail");
+    assert!(matches!(err, vm::VmError::UnboundImport(name) if name == "add_one"));
+}
+
+#[test]
+fn host_function_registry_caches_import_plan_across_vms() {
+    let source = include_str!("../examples/example.rss");
+    let compiled = compile_source(source).expect("compile should succeed");
+
+    let mut registry = HostFunctionRegistry::new();
+    registry.register("print", 1, || Box::new(PrintBuiltin));
+    registry.register("add_one", 1, || Box::new(AddOne));
+
+    let mut vm1 = Vm::with_locals(compiled.program.clone(), compiled.locals);
+    registry
+        .bind_vm_cached(&mut vm1)
+        .expect("cached host binding should succeed");
+    let status1 = vm1.run().expect("vm should run");
+    assert_eq!(status1, VmStatus::Halted);
+    assert_eq!(vm1.stack(), &[Value::Int(6)]);
+
+    let mut vm2 = Vm::with_locals(compiled.program, compiled.locals);
+    registry
+        .bind_vm_cached(&mut vm2)
+        .expect("cached host binding should succeed");
+    let status2 = vm2.run().expect("vm should run");
+    assert_eq!(status2, VmStatus::Halted);
+    assert_eq!(vm2.stack(), &[Value::Int(6)]);
+}
+
+#[test]
+fn compile_source_supports_static_function_pointer_binding() {
+    let source = r#"
+        fn add_one(x);
+        add_one(41);
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_static_function("add_one", static_add_one);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn host_function_registry_caches_static_function_pointer_plan_across_vms() {
+    let source = include_str!("../examples/example.rss");
+    let compiled = compile_source(source).expect("compile should succeed");
+
+    let mut registry = HostFunctionRegistry::new();
+    registry.register_static("print", 1, |_vm, args| {
+        Ok(CallOutcome::Return(args.to_vec()))
+    });
+    registry.register_static("add_one", 1, static_add_one);
+    let plan = registry
+        .prepare_plan(&compiled.program.imports)
+        .expect("plan should build");
+
+    let mut vm1 = Vm::with_locals(compiled.program.clone(), compiled.locals);
+    registry
+        .bind_vm_with_plan(&mut vm1, &plan)
+        .expect("cached static host binding should succeed");
+    let status1 = vm1.run().expect("vm should run");
+    assert_eq!(status1, VmStatus::Halted);
+    assert_eq!(vm1.stack(), &[Value::Int(6)]);
+
+    let mut vm2 = Vm::with_locals(compiled.program, compiled.locals);
+    registry
+        .bind_vm_with_plan(&mut vm2, &plan)
+        .expect("cached static host binding should succeed");
+    let status2 = vm2.run().expect("vm should run");
+    assert_eq!(status2, VmStatus::Halted);
+    assert_eq!(vm2.stack(), &[Value::Int(6)]);
 }
 
 #[test]

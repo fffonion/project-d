@@ -25,10 +25,10 @@ fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) {
     for decl in functions {
         match decl.name.as_str() {
             "print" => {
-                vm.register_function(Box::new(PrintFunction));
+                vm.bind_function("print", Box::new(PrintFunction));
             }
             "add_one" => {
-                vm.register_function(Box::new(AddOneFunction));
+                vm.bind_function("add_one", Box::new(AddOneFunction));
             }
             other => panic!("unknown function '{other}'"),
         }

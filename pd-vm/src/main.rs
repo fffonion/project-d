@@ -177,28 +177,22 @@ fn resolve_source_path(arg: Option<&str>) -> Result<PathBuf, io::Error> {
 
 fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) -> Result<(), io::Error> {
     for decl in functions {
-        let registered = match decl.name.as_str() {
-            "print" => vm.register_function(Box::new(PrintFunction)),
-            "add_one" => vm.register_function(Box::new(AddOneFunction)),
-            "echo" => vm.register_function(Box::new(EchoFunction)),
-            "get_header" => vm.register_function(Box::new(GetHeaderFunction)),
-            "rate_limit_allow" => vm.register_function(Box::new(RateLimitAllowFunction)),
+        match decl.name.as_str() {
+            "print" => vm.bind_function("print", Box::new(PrintFunction)),
+            "add_one" => vm.bind_function("add_one", Box::new(AddOneFunction)),
+            "echo" => vm.bind_function("echo", Box::new(EchoFunction)),
+            "get_header" => vm.bind_function("get_header", Box::new(GetHeaderFunction)),
+            "rate_limit_allow" => {
+                vm.bind_function("rate_limit_allow", Box::new(RateLimitAllowFunction))
+            }
             "set_header" | "set_response_content" | "set_upstream" => {
-                vm.register_function(Box::new(NoopFunction))
+                vm.bind_function(decl.name.as_str(), Box::new(NoopFunction))
             }
             other => {
                 return Err(io::Error::other(format!(
-                    "no host binding for function '{other}' at index {}",
-                    decl.index
+                    "no host binding for function '{other}'",
                 )));
             }
-        };
-
-        if registered != decl.index {
-            return Err(io::Error::other(format!(
-                "host function order mismatch for '{}': expected {}, got {}",
-                decl.name, decl.index, registered
-            )));
         }
     }
     Ok(())
