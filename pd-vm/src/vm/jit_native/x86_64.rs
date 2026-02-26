@@ -241,6 +241,8 @@ fn emit_native_prologue(code: &mut Vec<u8>) {
     code.push(0x53); // push rbx
     #[cfg(target_os = "windows")]
     {
+        code.push(0x56); // push rsi
+        code.push(0x57); // push rdi
         code.extend_from_slice(&[0x48, 0x89, 0xCB]); // mov rbx, rcx
         code.extend_from_slice(&[0x48, 0x83, 0xEC, 0x20]); // sub rsp, 32
     }
@@ -254,6 +256,8 @@ fn emit_native_epilogue(code: &mut Vec<u8>) {
     #[cfg(target_os = "windows")]
     {
         code.extend_from_slice(&[0x48, 0x83, 0xC4, 0x20]); // add rsp, 32
+        code.push(0x5F); // pop rdi
+        code.push(0x5E); // pop rsi
     }
     code.push(0x5B); // pop rbx
     code.push(0xC3); // ret
@@ -1560,11 +1564,13 @@ fn decode_tag(bytes: &[u8], offset: usize, size: usize) -> u32 {
 }
 
 fn encode_value_bytes(value: Value) -> Vec<u8> {
-    let mut bytes = vec![0u8; std::mem::size_of::<Value>()];
+    let size = std::mem::size_of::<Value>();
+    let mut bytes = vec![0u8; size];
+    let mut slot = std::mem::MaybeUninit::<Value>::zeroed();
     unsafe {
-        let ptr = bytes.as_mut_ptr() as *mut Value;
-        ptr.write(value);
-        std::ptr::drop_in_place(ptr);
+        slot.as_mut_ptr().write(value);
+        std::ptr::copy_nonoverlapping(slot.as_ptr() as *const u8, bytes.as_mut_ptr(), size);
+        std::ptr::drop_in_place(slot.as_mut_ptr());
     }
     bytes
 }
