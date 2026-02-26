@@ -1,0 +1,19 @@
+[package]
+name = "pd-vm"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "vm"
+
+[[bin]]
+name = "pd-vm-run"
+path = "src/main.rs"
+
+[dependencies]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

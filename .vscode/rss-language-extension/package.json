@@ -1,0 +1,36 @@
+{
+  "name": "pd-rss-syntax",
+  "displayName": "PD RSS Syntax",
+  "description": "Syntax highlighting for Project D Rust-like .rss files.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "pd-rss",
+        "aliases": [
+          "PD RSS",
+          "rss"
+        ],
+        "extensions": [
+          ".rss"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "pd-rss",
+        "scopeName": "source.rss",
+        "path": "./syntaxes/rss.tmLanguage.json"
+      }
+    ]
+  }
+}

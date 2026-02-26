@@ -1,0 +1,9 @@
+[package]
+name = "pd-proxy-abi"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+name = "proxy_abi"
+
+[dependencies]

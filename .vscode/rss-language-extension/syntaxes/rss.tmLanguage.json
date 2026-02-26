@@ -1,0 +1,190 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "PD Rust-like Script",
+  "scopeName": "source.rss",
+  "fileTypes": [
+    "rss"
+  ],
+  "patterns": [
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#function-declaration"
+    },
+    {
+      "include": "#macro-call"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#booleans"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#function-call"
+    },
+    {
+      "include": "#variable-declaration"
+    },
+    {
+      "include": "#closure-pipes"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.rss",
+          "begin": "//",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.rss"
+            }
+          },
+          "end": "$"
+        },
+        {
+          "name": "comment.block.rss",
+          "begin": "/\\*",
+          "beginCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.begin.rss"
+            }
+          },
+          "end": "\\*/",
+          "endCaptures": {
+            "0": {
+              "name": "punctuation.definition.comment.end.rss"
+            }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.rss",
+      "begin": "\"",
+      "beginCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.begin.rss"
+        }
+      },
+      "end": "\"",
+      "endCaptures": {
+        "0": {
+          "name": "punctuation.definition.string.end.rss"
+        }
+      },
+      "patterns": [
+        {
+          "name": "constant.character.escape.rss",
+          "match": "\\\\(?:[nrt\\\\\"0])"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "storage.type.function.rss",
+          "match": "\\bfn\\b"
+        },
+        {
+          "name": "storage.modifier.rss",
+          "match": "\\blet\\b"
+        },
+        {
+          "name": "keyword.control.rss",
+          "match": "\\b(?:for|if|else|while|break|continue)\\b"
+        }
+      ]
+    },
+    "booleans": {
+      "name": "constant.language.boolean.rss",
+      "match": "\\b(?:true|false)\\b"
+    },
+    "numbers": {
+      "name": "constant.numeric.integer.decimal.rss",
+      "match": "\\b\\d+\\b"
+    },
+    "function-declaration": {
+      "patterns": [
+        {
+          "name": "meta.function.declaration.rss",
+          "match": "\\b(fn)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+          "captures": {
+            "1": {
+              "name": "storage.type.function.rss"
+            },
+            "3": {
+              "name": "entity.name.function.rss"
+            }
+          }
+        }
+      ]
+    },
+    "function-call": {
+      "patterns": [
+        {
+          "name": "entity.name.function.rss",
+          "match": "\\b(?!fn\\b|let\\b|for\\b|if\\b|else\\b|while\\b|break\\b|continue\\b|true\\b|false\\b)([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "macro-call": {
+      "patterns": [
+        {
+          "name": "meta.macro.call.rss",
+          "match": "\\b([A-Za-z_][A-Za-z0-9_]*)(\\s*)(!)(?=\\s*\\()",
+          "captures": {
+            "1": {
+              "name": "entity.name.function.macro.rss"
+            },
+            "3": {
+              "name": "punctuation.definition.macro.rss"
+            }
+          }
+        }
+      ]
+    },
+    "variable-declaration": {
+      "patterns": [
+        {
+          "name": "meta.variable.declaration.rss",
+          "match": "\\b(let)(\\s+)([A-Za-z_][A-Za-z0-9_]*)\\b",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.rss"
+            },
+            "3": {
+              "name": "variable.other.definition.rss"
+            }
+          }
+        }
+      ]
+    },
+    "closure-pipes": {
+      "name": "punctuation.separator.closure.rss",
+      "match": "\\|"
+    },
+    "operators": {
+      "name": "keyword.operator.rss",
+      "match": "==|=|\\+|-|\\*|/|<|>"
+    },
+    "punctuation": {
+      "name": "punctuation.separator.rss",
+      "match": "[(){};,]"
+    }
+  }
+}
