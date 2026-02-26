@@ -124,6 +124,8 @@ Built-in print aliases (no declaration needed):
 - Scheme subset: `(print value)`
 
 Loop control supports `break` and `continue`.
+Scheme loop forms include `(while condition body...)` and Guile-style
+`(do ((name init [step]) ...) (test expr...) body...)`.
 
 JavaScript/Lua external declarations can use module forms (`import ...` / `require(...)`); calls
 to unresolved names are treated as host externs in those flavors.

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::super::{ParseError, is_ident_continue, is_ident_start};
 
 pub(super) fn lower(source: &str) -> Result<String, ParseError> {
@@ -356,6 +358,7 @@ fn lower_stmt(form: &SchemeForm, indent: usize, out: &mut Vec<String>) -> Result
             "set!" => return lower_set_stmt(args, form.line, indent, out),
             "if" => return lower_if_stmt(args, form.line, indent, out),
             "while" => return lower_while_stmt(args, form.line, indent, out),
+            "do" => return lower_do_stmt(args, form.line, indent, out),
             "for" => return lower_for_stmt(args, form.line, indent, out),
             "break" => return lower_break_stmt(args, form.line, indent, out),
             "continue" => return lower_continue_stmt(args, form.line, indent, out),
@@ -510,6 +513,102 @@ fn lower_while_stmt(
     push_line(out, indent, &format!("while {condition} {{"));
     for stmt in &args[1..] {
         lower_stmt(stmt, indent + 1, out)?;
+    }
+    push_line(out, indent, "}");
+    Ok(())
+}
+
+fn lower_do_stmt(
+    args: &[SchemeForm],
+    line: usize,
+    indent: usize,
+    out: &mut Vec<String>,
+) -> Result<(), ParseError> {
+    if args.len() < 2 {
+        return Err(ParseError {
+            line,
+            message: "do expects (do ((name init [step]) ...) (test expr...) body...)".to_string(),
+        });
+    }
+
+    let bindings = args[0].as_list().ok_or(ParseError {
+        line: args[0].line,
+        message: "do bindings must be a list".to_string(),
+    })?;
+    let mut binding_names = HashSet::new();
+    let mut step_updates = Vec::new();
+
+    for (index, binding_form) in bindings.iter().enumerate() {
+        let binding = binding_form.as_list().ok_or(ParseError {
+            line: binding_form.line,
+            message: "each do binding must be a list".to_string(),
+        })?;
+        if binding.len() < 2 || binding.len() > 3 {
+            return Err(ParseError {
+                line: binding_form.line,
+                message: "do binding must be (name init [step])".to_string(),
+            });
+        }
+
+        let name_raw = binding[0].as_symbol().ok_or(ParseError {
+            line: binding[0].line,
+            message: "do binding name must be a symbol".to_string(),
+        })?;
+        let name = normalize_identifier(name_raw, binding[0].line, "do binding name")?;
+        if !binding_names.insert(name.clone()) {
+            return Err(ParseError {
+                line: binding[0].line,
+                message: format!("duplicate do binding '{name_raw}'"),
+            });
+        }
+
+        let init = lower_expr(&binding[1])?;
+        push_line(out, indent, &format!("let {name} = {init};"));
+
+        if binding.len() == 3 {
+            let step = lower_expr(&binding[2])?;
+            let temp = format!("__do_step_{}_{}", line, index);
+            step_updates.push((name, temp, step));
+        }
+    }
+
+    let test_clause = args[1].as_list().ok_or(ParseError {
+        line: args[1].line,
+        message: "do test clause must be a list".to_string(),
+    })?;
+    if test_clause.is_empty() {
+        return Err(ParseError {
+            line: args[1].line,
+            message: "do test clause must start with a test expression".to_string(),
+        });
+    }
+
+    let test_expr = lower_expr(&test_clause[0])?;
+    let result_exprs = &test_clause[1..];
+
+    push_line(out, indent, "while true {");
+    push_line(out, indent + 1, &format!("if {test_expr} {{"));
+    if let Some((last, prefix)) = result_exprs.split_last() {
+        for (index, expr) in prefix.iter().enumerate() {
+            let lowered = lower_expr(expr)?;
+            let temp = format!("__do_result_{}_{}", line, index);
+            push_line(out, indent + 2, &format!("let {temp} = {lowered};"));
+        }
+        let lowered_last = lower_expr(last)?;
+        push_line(out, indent + 2, &format!("{lowered_last};"));
+    }
+    push_line(out, indent + 2, "break;");
+    push_line(out, indent + 1, "}");
+
+    for stmt in &args[2..] {
+        lower_stmt(stmt, indent + 1, out)?;
+    }
+
+    for (_, temp, step) in &step_updates {
+        push_line(out, indent + 1, &format!("let {temp} = {step};"));
+    }
+    for (name, temp, _) in &step_updates {
+        push_line(out, indent + 1, &format!("{name} = {temp};"));
     }
     push_line(out, indent, "}");
     Ok(())
@@ -723,12 +822,11 @@ fn lower_list_expr(items: &[SchemeForm], line: usize) -> Result<String, ParseErr
         "<" => lower_binary_expr(args, "<", line, "< expects exactly two arguments"),
         ">" => lower_binary_expr(args, ">", line, "> expects exactly two arguments"),
         "lambda" => lower_lambda_expr(args, line),
-        "if" | "while" | "for" | "define" | "set!" | "declare" | "break" | "continue" | "begin" => {
-            Err(ParseError {
-                line,
-                message: format!("special form '{head}' is only valid in statement position"),
-            })
-        }
+        "if" | "while" | "do" | "for" | "define" | "set!" | "declare" | "break" | "continue"
+        | "begin" => Err(ParseError {
+            line,
+            message: format!("special form '{head}' is only valid in statement position"),
+        }),
         _ => {
             let callee = normalize_identifier(head, items[0].line, "call target")?;
             let mut rendered = Vec::new();

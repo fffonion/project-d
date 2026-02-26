@@ -1311,7 +1311,7 @@ fn emit_native_step_call_inline(
 ) -> VmResult<()> {
     let call_ip = u64::try_from(call_ip)
         .map_err(|_| VmError::JitNative("trace call_ip exceeds 64-bit range".to_string()))?;
-    let helper_addr = jit_native_step_call as usize;
+    let helper_addr = jit_native_step_call as *const () as usize;
     let helper_addr = u64::try_from(helper_addr).map_err(|_| {
         VmError::JitNative("native helper pointer exceeds 64-bit range".to_string())
     })?;

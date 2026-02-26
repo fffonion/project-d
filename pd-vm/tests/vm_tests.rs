@@ -530,6 +530,22 @@ fn scheme_assignment_updates_existing_local_without_new_slot() {
 }
 
 #[test]
+fn scheme_do_loop_syntax_is_supported() {
+    let source = r#"
+        (do ((i 1 (+ i 1))
+             (p 3 (* 3 p)))
+            ((> i 4) p))
+    "#;
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Scheme).expect("compile should succeed");
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(243)]);
+}
+
+#[test]
 fn rss_print_macro_works_without_decl() {
     let source = r#"
         print!(40 + 2);
