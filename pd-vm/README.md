@@ -88,8 +88,8 @@ Directives:
 
 ### Tiny compiler
 
-Use `compile_source()` for Rust-like syntax (`.rss`) or `compile_source_file()` to auto-detect
-syntax by extension (`.rss`, `.js`, `.lua`). It returns `CompiledProgram`, which includes the
+Use `compile_source()` for Rss syntax (`.rss`) or `compile_source_file()` to auto-detect
+syntax by extension (`.rss`, `.js`, `.lua`, `.scm`). It returns `CompiledProgram`, which includes the
 program and required local count.
 
 ```
@@ -118,9 +118,10 @@ local add = function(value) return value + base end
 ```
 
 Built-in print aliases (no declaration needed):
-- Rust-like: `print!(value);`
+- Rss: `print!(value);`
 - JavaScript subset: `console.log(value);` and `print(value);`
 - Lua subset: `print(value)`
+- Scheme subset: `(print value)`
 
 Loop control supports `break` and `continue`.
 
@@ -156,6 +157,7 @@ Other flavors:
 ```powershell
 cargo run -p pd-vm --bin pd-vm-run -- examples/example.js
 cargo run -p pd-vm --bin pd-vm-run -- examples/example.rss
+cargo run -p pd-vm --bin pd-vm-run -- examples/example.scm
 ```
 
 JIT visibility (dump compiled traces + NYI reasons):

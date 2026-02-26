@@ -4,7 +4,7 @@
 
 ## Workspace crates
 
-- `pd-vm`: VM runtime, assembler, source compiler (`.rss`, `.js`, `.lua`), debugger, and trace JIT.
+- `pd-vm`: VM runtime, assembler, source compiler (`.rss`, `.js`, `.lua`, `.scm`), debugger, and trace JIT.
 - `pd-proxy`: HTTP proxy runtime with control plane APIs for uploading VM programs and optional debug sessions.
 - `pd-proxy-abi`: shared ABI contract (Rust constants + `abi.json`) used by the proxy host-call layer.
 

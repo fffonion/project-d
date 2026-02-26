@@ -1,6 +1,6 @@
 fn add_one(x);
 
-// Example: all core syntax in Rust-like flavor
+// Example: all core syntax in Rss flavor
 let sum = 0;
 let limit = 5;
 

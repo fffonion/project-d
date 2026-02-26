@@ -475,6 +475,27 @@ fn compile_source_with_lua_flavor() {
 }
 
 #[test]
+fn compile_source_with_scheme_flavor() {
+    let source = include_str!("../examples/example.scm");
+
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Scheme).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    for func in &compiled.functions {
+        match func.name.as_str() {
+            "add_one" => vm.register_function(Box::new(AddOne)),
+            "print" => vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(6)]);
+}
+
+#[test]
 fn lua_assignment_updates_existing_local_without_new_slot() {
     let source = r#"
         local a = 1
@@ -492,7 +513,24 @@ fn lua_assignment_updates_existing_local_without_new_slot() {
 }
 
 #[test]
-fn rust_like_print_macro_works_without_decl() {
+fn scheme_assignment_updates_existing_local_without_new_slot() {
+    let source = r#"
+        (define a 1)
+        (set! a 2)
+        a
+    "#;
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Scheme).expect("compile should succeed");
+    assert_eq!(compiled.locals, 1);
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(2)]);
+}
+
+#[test]
+fn rss_print_macro_works_without_decl() {
     let source = r#"
         print!(40 + 2);
     "#;
@@ -618,6 +656,25 @@ fn compile_source_with_lua_closure_fixture() {
     let source = include_str!("../examples/closure.lua");
     let compiled =
         compile_source_with_flavor(source, SourceFlavor::Lua).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    for func in &compiled.functions {
+        match func.name.as_str() {
+            "print" => vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(12)]);
+}
+
+#[test]
+fn compile_source_with_scheme_closure_fixture() {
+    let source = include_str!("../examples/closure.scm");
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Scheme).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
     for func in &compiled.functions {
@@ -764,6 +821,37 @@ fn compile_source_file_detects_lua_extension() {
     let base = std::env::temp_dir().join(unique);
     let path = base.with_extension("lua");
     std::fs::write(&path, include_str!("../examples/example.lua"))
+        .expect("temp source should write");
+
+    let compiled = compile_source_file(&path).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    for func in &compiled.functions {
+        match func.name.as_str() {
+            "add_one" => vm.register_function(Box::new(AddOne)),
+            "print" => vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(6)]);
+
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn compile_source_file_detects_scheme_extension() {
+    let unique = format!(
+        "vm_extension_test_scheme_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let base = std::env::temp_dir().join(unique);
+    let path = base.with_extension("scm");
+    std::fs::write(&path, include_str!("../examples/example.scm"))
         .expect("temp source should write");
 
     let compiled = compile_source_file(&path).expect("compile should succeed");

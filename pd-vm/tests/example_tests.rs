@@ -57,6 +57,9 @@ fn examples_run() {
     let stack = run_compiled_file(&root.join("example.lua"));
     assert_eq!(stack, vec![Value::Int(6)]);
 
+    let stack = run_compiled_file(&root.join("example.scm"));
+    assert_eq!(stack, vec![Value::Int(6)]);
+
     let stack = run_compiled_file(&root.join("closure.rss"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
@@ -66,6 +69,9 @@ fn examples_run() {
     let stack = run_compiled_file(&root.join("closure.lua"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
+    let stack = run_compiled_file(&root.join("closure.scm"));
+    assert_eq!(stack, vec![Value::Int(12)]);
+
     let stack = run_compiled_file(&root.join("assignment_example.rss"));
     assert_eq!(stack, vec![Value::Int(2)]);
 
@@ -73,5 +79,8 @@ fn examples_run() {
     assert_eq!(stack, vec![Value::Int(2)]);
 
     let stack = run_compiled_file(&root.join("assignment_example.lua"));
+    assert_eq!(stack, vec![Value::Int(2)]);
+
+    let stack = run_compiled_file(&root.join("assignment_example.scm"));
     assert_eq!(stack, vec![Value::Int(2)]);
 }
