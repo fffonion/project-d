@@ -237,7 +237,7 @@ struct PrintNoReturn;
 
 impl HostFunction for AddOne {
     fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
-        let value = match args.get(0) {
+        let value = match args.first() {
             Some(Value::Int(value)) => *value,
             _ => 0,
         };
@@ -247,7 +247,7 @@ impl HostFunction for AddOne {
 
 impl HostFunction for EchoString {
     fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
-        let value = match args.get(0) {
+        let value = match args.first() {
             Some(Value::String(value)) => value.clone(),
             _ => return Err(vm::VmError::TypeMismatch("string")),
         };

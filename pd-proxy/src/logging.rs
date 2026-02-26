@@ -7,8 +7,9 @@ static ANSI_ENABLED: OnceLock<bool> = OnceLock::new();
 
 pub fn init() -> Result<(), Box<dyn std::error::Error>> {
     let ansi = detect_ansi();
+    // let _ = ANSI_ENABLED.set(ansi && false);
     // temporarily disable ansi
-    let _ = ANSI_ENABLED.set(ansi && false);
+    let _ = ANSI_ENABLED.set(false);
 
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     tracing_subscriber::fmt()

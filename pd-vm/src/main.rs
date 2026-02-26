@@ -94,11 +94,11 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     let mut cfg = CliConfig::default();
     let mut index = 0usize;
 
-    if let Some(first) = args.first() {
-        if first == "debug" {
-            cfg.debug = true;
-            index = 1;
-        }
+    if let Some(first) = args.first()
+        && first == "debug"
+    {
+        cfg.debug = true;
+        index = 1;
     }
 
     while index < args.len() {

@@ -20,6 +20,12 @@ pub struct Debugger {
     server: Option<DebugServer>,
 }
 
+impl Default for Debugger {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Debugger {
     pub fn new() -> Self {
         Self {
@@ -57,12 +63,11 @@ impl Debugger {
         let ip = vm.ip();
         let mut should_break = self.breakpoints.contains(&ip);
 
-        if !should_break {
-            if let Some(line) = current_line(vm) {
-                if self.line_breakpoints.contains(&line) {
-                    should_break = true;
-                }
-            }
+        if !should_break
+            && let Some(line) = current_line(vm)
+            && self.line_breakpoints.contains(&line)
+        {
+            should_break = true;
         }
 
         if !should_break {

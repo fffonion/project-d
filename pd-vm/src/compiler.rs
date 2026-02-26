@@ -1919,65 +1919,64 @@ fn lower_lua_subset(source: &str) -> Result<String, ParseError> {
             continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("if ") {
-            if let Some(condition) = rest.strip_suffix(" then") {
-                out.push(format!("if {} {{", condition.trim()));
-                blocks.push(LuaBlock::If);
-                continue;
-            }
+        if let Some(rest) = trimmed.strip_prefix("if ")
+            && let Some(condition) = rest.strip_suffix(" then")
+        {
+            out.push(format!("if {} {{", condition.trim()));
+            blocks.push(LuaBlock::If);
+            continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("while ") {
-            if let Some(condition) = rest.strip_suffix(" do") {
-                out.push(format!("while {} {{", condition.trim()));
-                blocks.push(LuaBlock::While);
-                continue;
-            }
+        if let Some(rest) = trimmed.strip_prefix("while ")
+            && let Some(condition) = rest.strip_suffix(" do")
+        {
+            out.push(format!("while {} {{", condition.trim()));
+            blocks.push(LuaBlock::While);
+            continue;
         }
 
-        if let Some(rest) = trimmed.strip_prefix("for ") {
-            if let Some(header) = rest.strip_suffix(" do") {
-                let eq_index = header.find('=').ok_or(ParseError {
+        if let Some(rest) = trimmed.strip_prefix("for ")
+            && let Some(header) = rest.strip_suffix(" do")
+        {
+            let eq_index = header.find('=').ok_or(ParseError {
+                line: line_no,
+                message: "lua for loop must contain '='".to_string(),
+            })?;
+            let name = header[..eq_index].trim();
+            let mut name_chars = name.chars();
+            let valid_name = match name_chars.next() {
+                Some(first) if is_ident_start(first) => name_chars.all(is_ident_continue),
+                _ => false,
+            };
+            if !valid_name {
+                return Err(ParseError {
                     line: line_no,
-                    message: "lua for loop must contain '='".to_string(),
-                })?;
-                let name = header[..eq_index].trim();
-                let mut name_chars = name.chars();
-                let valid_name = match name_chars.next() {
-                    Some(first) if is_ident_start(first) => name_chars.all(is_ident_continue),
-                    _ => false,
-                };
-                if !valid_name {
-                    return Err(ParseError {
-                        line: line_no,
-                        message: "invalid lua for loop variable".to_string(),
-                    });
-                }
-                let rhs = header[eq_index + 1..].trim();
-                let parts = split_top_level_csv(rhs);
-                if parts.len() < 2 || parts.len() > 3 {
-                    return Err(ParseError {
-                        line: line_no,
-                        message: "lua numeric for loop must be 'for name = start, end [, step] do'"
-                            .to_string(),
-                    });
-                }
-                let start_expr = parts[0].trim();
-                let end_expr = parts[1].trim();
-                let step_expr = parts.get(2).map(|s| s.trim()).unwrap_or("1");
-                if step_expr.starts_with('-') {
-                    return Err(ParseError {
-                        line: line_no,
-                        message: "negative lua for steps are not supported in this subset"
-                            .to_string(),
-                    });
-                }
-                out.push(format!(
+                    message: "invalid lua for loop variable".to_string(),
+                });
+            }
+            let rhs = header[eq_index + 1..].trim();
+            let parts = split_top_level_csv(rhs);
+            if parts.len() < 2 || parts.len() > 3 {
+                return Err(ParseError {
+                    line: line_no,
+                    message: "lua numeric for loop must be 'for name = start, end [, step] do'"
+                        .to_string(),
+                });
+            }
+            let start_expr = parts[0].trim();
+            let end_expr = parts[1].trim();
+            let step_expr = parts.get(2).map(|s| s.trim()).unwrap_or("1");
+            if step_expr.starts_with('-') {
+                return Err(ParseError {
+                    line: line_no,
+                    message: "negative lua for steps are not supported in this subset".to_string(),
+                });
+            }
+            out.push(format!(
                     "for (let {name} = {start_expr}; {name} < (({end_expr}) + 1); {name} = {name} + ({step_expr})) {{"
                 ));
-                blocks.push(LuaBlock::For);
-                continue;
-            }
+            blocks.push(LuaBlock::For);
+            continue;
         }
 
         if trimmed == "else" {
@@ -2061,9 +2060,7 @@ fn split_top_level_csv(input: &str) -> Vec<String> {
                 current.push(ch);
             }
             ')' => {
-                if paren_depth > 0 {
-                    paren_depth -= 1;
-                }
+                paren_depth = paren_depth.saturating_sub(1);
                 current.push(ch);
             }
             ',' if paren_depth == 0 => {
@@ -2215,6 +2212,12 @@ pub struct Compiler {
 struct LoopContext {
     continue_label: String,
     break_label: String,
+}
+
+impl Default for Compiler {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Compiler {

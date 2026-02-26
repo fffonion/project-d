@@ -13,7 +13,7 @@ impl HostFunction for PrintFunction {
 
 impl HostFunction for AddOneFunction {
     fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
-        let value = match args.get(0) {
+        let value = match args.first() {
             Some(Value::Int(value)) => *value,
             _ => return Err(vm::VmError::TypeMismatch("int")),
         };

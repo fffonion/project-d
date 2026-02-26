@@ -26,6 +26,12 @@ pub struct Assembler {
     debug: DebugInfoBuilder,
 }
 
+impl Default for Assembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Assembler {
     pub fn new() -> Self {
         Self {
@@ -217,6 +223,12 @@ impl Assembler {
 
     fn emit_u32(&mut self, value: u32) {
         self.code.extend_from_slice(&value.to_le_bytes());
+    }
+}
+
+impl Default for BytecodeBuilder {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -611,7 +611,7 @@ impl Vm {
     fn execute_jit_entry(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         #[cfg(target_arch = "x86_64")]
         {
-            return self.execute_jit_native(trace_id);
+            self.execute_jit_native(trace_id)
         }
         #[cfg(not(target_arch = "x86_64"))]
         {
@@ -785,7 +785,7 @@ fn emit_trace_stub_bytes(trace_id: usize) -> Vec<u8> {
     // mov rax, imm64 ; helper address
     code.push(0x48);
     code.push(0xB8);
-    code.extend_from_slice(&(jit_bridge_entry as usize as u64).to_le_bytes());
+    code.extend_from_slice(&(jit_bridge_entry as *const () as usize as u64).to_le_bytes());
 
     // jmp rax ; tail-call helper (keeps caller's ABI stack shape)
     code.push(0xFF);
