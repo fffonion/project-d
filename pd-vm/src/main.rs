@@ -265,6 +265,7 @@ impl HostFunction for NoopFunction {
 fn format_value(value: &Value) -> String {
     match value {
         Value::Int(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
         Value::Bool(value) => value.to_string(),
         Value::String(value) => value.clone(),
     }

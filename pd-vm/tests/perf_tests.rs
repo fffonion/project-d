@@ -287,34 +287,36 @@ fn perf_jit_native_reduces_tight_loop_latency() {
         return;
     }
 
-    const LOOP_ITERS: i64 = 150_000;
-    const REPETITIONS: i64 = 12;
-    const TRIALS: usize = 5;
+    const INNER_LOOP_ITERS: i64 = 40_000;
+    const OUTER_LOOPS: i64 = 8;
+    const TRIALS: usize = 7;
     let source = format!(
         r#"
+        let outer = 0;
         let i = 0;
         let sum = 0;
-        while i < {LOOP_ITERS} {{
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            sum = sum + i;
-            i = i + 1;
+        while outer < {OUTER_LOOPS} {{
+            i = 0;
+            while i < {INNER_LOOP_ITERS} {{
+                let a = i + 7;
+                let b = a - 3;
+                let c = b * 8;
+                let d = c / 8;
+                let e = d + i;
+                let n = 0 - e;
+                let p = 0 - n;
+                sum = sum + p;
+                i = i + 1;
+            }}
+            outer = outer + 1;
         }}
         sum;
     "#
     );
 
     let compiled = compile_source(&source).expect("compile should succeed");
-    let expected = REPETITIONS * LOOP_ITERS * (LOOP_ITERS - 1) / 2;
+    let expected_per_outer = INNER_LOOP_ITERS * INNER_LOOP_ITERS + 3 * INNER_LOOP_ITERS;
+    let expected = OUTER_LOOPS * expected_per_outer;
 
     let _ = run_sum_loop_with_jit(&compiled.program, compiled.locals, false, expected);
     let _ = run_sum_loop_with_jit(&compiled.program, compiled.locals, true, expected);
@@ -340,9 +342,10 @@ fn perf_jit_native_reduces_tight_loop_latency() {
     let jit_median = median_duration(&mut jit_times);
 
     println!(
-        "tight-loop latency median: interpreter={}ms jit={}ms",
+        "tight-loop latency median: interpreter={}ms jit={}ms speedup={:.2}x",
         interpreter_median.as_millis(),
-        jit_median.as_millis()
+        jit_median.as_millis(),
+        interpreter_median.as_secs_f64() / jit_median.as_secs_f64(),
     );
 
     assert!(

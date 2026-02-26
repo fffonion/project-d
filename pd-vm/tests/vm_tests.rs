@@ -56,6 +56,25 @@ fn shift_ops_and_msil_literals_work() {
 }
 
 #[test]
+fn arithmetic_supports_float_and_mixed_numeric() {
+    let constants = vec![Value::Float(1.5), Value::Int(2), Value::Float(8.0)];
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.ldc(1);
+    bc.add();
+    bc.ldc(2);
+    bc.clt();
+    bc.ret();
+
+    let program = Program::new(constants, bc.finish());
+    let mut vm = Vm::new(program);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true)]);
+}
+
+#[test]
 fn brfalse_skips_block() {
     let constants = vec![Value::Bool(false), Value::Int(1), Value::Int(2)];
     let mut bc = BytecodeBuilder::new();

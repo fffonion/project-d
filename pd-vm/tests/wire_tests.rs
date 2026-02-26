@@ -9,6 +9,7 @@ fn wire_roundtrip_preserves_constants_and_code() {
     let program = Program::with_imports_and_debug(
         vec![
             Value::Int(42),
+            Value::Float(3.5),
             Value::Bool(true),
             Value::String("hello".to_string()),
         ],

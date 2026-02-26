@@ -665,8 +665,8 @@ fn parse_u16(token: &str, line_no: usize) -> Result<u16, AsmParseError> {
     })
 }
 
-fn parse_i64(token: &str, line_no: usize, what: &str) -> Result<i64, AsmParseError> {
-    token.parse::<i64>().map_err(|_| AsmParseError {
+fn parse_f64(token: &str, line_no: usize, what: &str) -> Result<f64, AsmParseError> {
+    token.parse::<f64>().map_err(|_| AsmParseError {
         line: line_no,
         message: format!("invalid {what} '{token}'"),
     })
@@ -682,7 +682,10 @@ fn parse_literal(token: &str, line_no: usize) -> Result<Value, AsmParseError> {
     } else if token.eq_ignore_ascii_case("false") {
         Ok(Value::Bool(false))
     } else {
-        parse_i64(token, line_no, "const literal").map(Value::Int)
+        match token.parse::<i64>() {
+            Ok(value) => Ok(Value::Int(value)),
+            Err(_) => parse_f64(token, line_no, "const literal").map(Value::Float),
+        }
     }
 }
 

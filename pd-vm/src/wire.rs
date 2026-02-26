@@ -136,6 +136,10 @@ pub fn encode_program(program: &Program) -> Result<Vec<u8>, WireError> {
                 out.push(0);
                 out.extend_from_slice(&value.to_le_bytes());
             }
+            Value::Float(value) => {
+                out.push(3);
+                out.extend_from_slice(&value.to_le_bytes());
+            }
             Value::Bool(value) => {
                 out.push(1);
                 out.push(u8::from(*value));
@@ -194,6 +198,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, WireError> {
         let tag = cursor.read_u8()?;
         let value = match tag {
             0 => Value::Int(cursor.read_i64()?),
+            3 => Value::Float(cursor.read_f64()?),
             1 => {
                 let raw = cursor.read_u8()?;
                 match raw {
@@ -530,6 +535,11 @@ impl<'a> Cursor<'a> {
     fn read_i64(&mut self) -> Result<i64, WireError> {
         let bytes = self.read_exact_array::<8>()?;
         Ok(i64::from_le_bytes(bytes))
+    }
+
+    fn read_f64(&mut self) -> Result<f64, WireError> {
+        let bytes = self.read_exact_array::<8>()?;
+        Ok(f64::from_le_bytes(bytes))
     }
 
     fn read_string(&mut self) -> Result<String, WireError> {

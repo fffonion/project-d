@@ -1,10 +1,20 @@
 use std::collections::HashMap;
 
+#[cfg(target_arch = "x86_64")]
+mod jit_native;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     String(String),
+}
+
+#[derive(Clone, Copy, Debug)]
+enum NumericValue {
+    Int(i64),
+    Float(f64),
 }
 
 impl Value {
@@ -12,6 +22,14 @@ impl Value {
         match self {
             Value::Int(value) => Ok(*value),
             _ => Err(VmError::TypeMismatch("int")),
+        }
+    }
+
+    fn as_numeric(&self) -> Result<NumericValue, VmError> {
+        match self {
+            Value::Int(value) => Ok(NumericValue::Int(*value)),
+            Value::Float(value) => Ok(NumericValue::Float(*value)),
+            _ => Err(VmError::TypeMismatch("number")),
         }
     }
 
@@ -442,14 +460,10 @@ type NativeTraceEntry = unsafe extern "C" fn(*mut Vm) -> i32;
 type NativeTraceEntry = fn(*mut Vm) -> i32;
 
 struct NativeTrace {
-    _memory: ExecutableMemory,
+    #[cfg(target_arch = "x86_64")]
+    _memory: jit_native::ExecutableMemory,
     entry: NativeTraceEntry,
     code: Vec<u8>,
-}
-
-struct ExecutableMemory {
-    ptr: *mut u8,
-    len: usize,
 }
 
 impl Vm {
@@ -638,27 +652,29 @@ impl Vm {
                 self.stack.push(value);
             }
             x if x == OpCode::Add as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                self.stack.push(Value::Int(lhs + rhs));
+                self.binary_numeric_op(|lhs, rhs| Ok(lhs + rhs), |lhs, rhs| Ok(lhs + rhs))?;
             }
             x if x == OpCode::Sub as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                self.stack.push(Value::Int(lhs - rhs));
+                self.binary_numeric_op(|lhs, rhs| Ok(lhs - rhs), |lhs, rhs| Ok(lhs - rhs))?;
             }
             x if x == OpCode::Mul as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                self.stack.push(Value::Int(lhs * rhs));
+                self.binary_numeric_op(|lhs, rhs| Ok(lhs * rhs), |lhs, rhs| Ok(lhs * rhs))?;
             }
             x if x == OpCode::Div as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                if rhs == 0 {
-                    return Err(VmError::DivisionByZero);
-                }
-                self.stack.push(Value::Int(lhs / rhs));
+                self.binary_numeric_op(
+                    |lhs, rhs| {
+                        if rhs == 0 {
+                            return Err(VmError::DivisionByZero);
+                        }
+                        Ok(lhs / rhs)
+                    },
+                    |lhs, rhs| {
+                        if rhs == 0.0 {
+                            return Err(VmError::DivisionByZero);
+                        }
+                        Ok(lhs / rhs)
+                    },
+                )?;
             }
             x if x == OpCode::Shl as u8 => {
                 let rhs = self.pop_shift_amount()?;
@@ -671,8 +687,11 @@ impl Vm {
                 self.stack.push(Value::Int(lhs >> rhs));
             }
             x if x == OpCode::Neg as u8 => {
-                let value = self.pop_int()?;
-                self.stack.push(Value::Int(-value));
+                let value = self.pop_numeric()?;
+                match value {
+                    NumericValue::Int(value) => self.stack.push(Value::Int(-value)),
+                    NumericValue::Float(value) => self.stack.push(Value::Float(-value)),
+                }
             }
             x if x == OpCode::Ceq as u8 => {
                 let rhs = self.pop_value()?;
@@ -680,14 +699,10 @@ impl Vm {
                 self.stack.push(Value::Bool(lhs == rhs));
             }
             x if x == OpCode::Clt as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                self.stack.push(Value::Bool(lhs < rhs));
+                self.compare_numeric_op(|lhs, rhs| lhs < rhs, |lhs, rhs| lhs < rhs)?;
             }
             x if x == OpCode::Cgt as u8 => {
-                let rhs = self.pop_int()?;
-                let lhs = self.pop_int()?;
-                self.stack.push(Value::Bool(lhs > rhs));
+                self.compare_numeric_op(|lhs, rhs| lhs > rhs, |lhs, rhs| lhs > rhs)?;
             }
             x if x == OpCode::Br as u8 => {
                 let target = self.read_u32()? as usize;
@@ -773,6 +788,7 @@ impl Vm {
         Ok(StepExecOutcome::Continue)
     }
 
+    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
     fn execute_jit_trace(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         let Some(trace) = self.jit.trace_clone(trace_id) else {
             return Ok(TraceExecOutcome::Continue);
@@ -790,27 +806,29 @@ impl Vm {
                     self.stack.push(value);
                 }
                 crate::jit::TraceStep::Add => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    self.stack.push(Value::Int(lhs + rhs));
+                    self.binary_numeric_op(|lhs, rhs| Ok(lhs + rhs), |lhs, rhs| Ok(lhs + rhs))?;
                 }
                 crate::jit::TraceStep::Sub => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    self.stack.push(Value::Int(lhs - rhs));
+                    self.binary_numeric_op(|lhs, rhs| Ok(lhs - rhs), |lhs, rhs| Ok(lhs - rhs))?;
                 }
                 crate::jit::TraceStep::Mul => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    self.stack.push(Value::Int(lhs * rhs));
+                    self.binary_numeric_op(|lhs, rhs| Ok(lhs * rhs), |lhs, rhs| Ok(lhs * rhs))?;
                 }
                 crate::jit::TraceStep::Div => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    if rhs == 0 {
-                        return Err(VmError::DivisionByZero);
-                    }
-                    self.stack.push(Value::Int(lhs / rhs));
+                    self.binary_numeric_op(
+                        |lhs, rhs| {
+                            if rhs == 0 {
+                                return Err(VmError::DivisionByZero);
+                            }
+                            Ok(lhs / rhs)
+                        },
+                        |lhs, rhs| {
+                            if rhs == 0.0 {
+                                return Err(VmError::DivisionByZero);
+                            }
+                            Ok(lhs / rhs)
+                        },
+                    )?;
                 }
                 crate::jit::TraceStep::Shl => {
                     let rhs = self.pop_shift_amount()?;
@@ -823,8 +841,11 @@ impl Vm {
                     self.stack.push(Value::Int(lhs >> rhs));
                 }
                 crate::jit::TraceStep::Neg => {
-                    let value = self.pop_int()?;
-                    self.stack.push(Value::Int(-value));
+                    let value = self.pop_numeric()?;
+                    match value {
+                        NumericValue::Int(value) => self.stack.push(Value::Int(-value)),
+                        NumericValue::Float(value) => self.stack.push(Value::Float(-value)),
+                    }
                 }
                 crate::jit::TraceStep::Ceq => {
                     let rhs = self.pop_value()?;
@@ -832,14 +853,10 @@ impl Vm {
                     self.stack.push(Value::Bool(lhs == rhs));
                 }
                 crate::jit::TraceStep::Clt => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    self.stack.push(Value::Bool(lhs < rhs));
+                    self.compare_numeric_op(|lhs, rhs| lhs < rhs, |lhs, rhs| lhs < rhs)?;
                 }
                 crate::jit::TraceStep::Cgt => {
-                    let rhs = self.pop_int()?;
-                    let lhs = self.pop_int()?;
-                    self.stack.push(Value::Bool(lhs > rhs));
+                    self.compare_numeric_op(|lhs, rhs| lhs > rhs, |lhs, rhs| lhs > rhs)?;
                 }
                 crate::jit::TraceStep::Pop => {
                     self.pop_value()?;
@@ -908,14 +925,16 @@ impl Vm {
             native.entry
         };
 
-        clear_jit_bridge_error();
+        jit_native::clear_bridge_error();
         let status = unsafe { entry(self as *mut Vm) };
         self.native_trace_exec_count = self.native_trace_exec_count.saturating_add(1);
         match status {
-            0 => Ok(TraceExecOutcome::Continue),
-            1 => Ok(TraceExecOutcome::Halted),
-            -1 => {
-                let err = take_jit_bridge_error().unwrap_or_else(|| {
+            jit_native::STATUS_CONTINUE | jit_native::STATUS_TRACE_EXIT => {
+                Ok(TraceExecOutcome::Continue)
+            }
+            jit_native::STATUS_HALTED => Ok(TraceExecOutcome::Halted),
+            jit_native::STATUS_ERROR => {
+                let err = jit_native::take_bridge_error().unwrap_or_else(|| {
                     VmError::JitNative("jit bridge reported failure without VmError".to_string())
                 });
                 Err(err)
@@ -933,8 +952,11 @@ impl Vm {
             return Ok(());
         }
 
-        let code = emit_trace_stub_bytes(trace_id);
-        let memory = ExecutableMemory::from_code(&code)?;
+        let trace = self.jit.trace_clone(trace_id).ok_or_else(|| {
+            VmError::JitNative(format!("trace {} missing for native compile", trace_id))
+        })?;
+        let code = jit_native::emit_native_trace_bytes(&trace)?;
+        let memory = jit_native::ExecutableMemory::from_code(&code)?;
         let entry = unsafe { std::mem::transmute::<*const u8, NativeTraceEntry>(memory.ptr) };
         self.native_traces.insert(
             trace_id,
@@ -991,8 +1013,63 @@ impl Vm {
         self.pop_value()?.as_int()
     }
 
+    fn pop_numeric(&mut self) -> VmResult<NumericValue> {
+        self.pop_value()?.as_numeric()
+    }
+
     fn pop_bool(&mut self) -> VmResult<bool> {
         self.pop_value()?.as_bool()
+    }
+
+    fn binary_numeric_op(
+        &mut self,
+        int_op: impl FnOnce(i64, i64) -> VmResult<i64>,
+        float_op: impl FnOnce(f64, f64) -> VmResult<f64>,
+    ) -> VmResult<()> {
+        let rhs = self.pop_numeric()?;
+        let lhs = self.pop_numeric()?;
+        match (lhs, rhs) {
+            (NumericValue::Int(lhs), NumericValue::Int(rhs)) => {
+                self.stack.push(Value::Int(int_op(lhs, rhs)?));
+            }
+            (lhs, rhs) => {
+                let lhs = match lhs {
+                    NumericValue::Int(v) => v as f64,
+                    NumericValue::Float(v) => v,
+                };
+                let rhs = match rhs {
+                    NumericValue::Int(v) => v as f64,
+                    NumericValue::Float(v) => v,
+                };
+                self.stack.push(Value::Float(float_op(lhs, rhs)?));
+            }
+        }
+        Ok(())
+    }
+
+    fn compare_numeric_op(
+        &mut self,
+        int_op: impl FnOnce(i64, i64) -> bool,
+        float_op: impl FnOnce(f64, f64) -> bool,
+    ) -> VmResult<()> {
+        let rhs = self.pop_numeric()?;
+        let lhs = self.pop_numeric()?;
+        let result = match (lhs, rhs) {
+            (NumericValue::Int(lhs), NumericValue::Int(rhs)) => int_op(lhs, rhs),
+            (lhs, rhs) => {
+                let lhs = match lhs {
+                    NumericValue::Int(v) => v as f64,
+                    NumericValue::Float(v) => v,
+                };
+                let rhs = match rhs {
+                    NumericValue::Int(v) => v as f64,
+                    NumericValue::Float(v) => v,
+                };
+                float_op(lhs, rhs)
+            }
+        };
+        self.stack.push(Value::Bool(result));
+        Ok(())
     }
 
     fn pop_shift_amount(&mut self) -> VmResult<u32> {
@@ -1111,210 +1188,4 @@ impl Vm {
             .copied()
             .ok_or(VmError::InvalidCall(index))
     }
-}
-
-#[cfg(target_arch = "x86_64")]
-fn emit_trace_stub_bytes(trace_id: usize) -> Vec<u8> {
-    let mut code = Vec::with_capacity(24);
-
-    #[cfg(all(target_arch = "x86_64", target_os = "windows"))]
-    {
-        // mov rdx, imm64 ; second arg = trace_id on Win64
-        code.push(0x48);
-        code.push(0xBA);
-        code.extend_from_slice(&(trace_id as u64).to_le_bytes());
-    }
-
-    #[cfg(all(target_arch = "x86_64", not(target_os = "windows")))]
-    {
-        // mov rsi, imm64 ; second arg = trace_id on SysV x86_64
-        code.push(0x48);
-        code.push(0xBE);
-        code.extend_from_slice(&(trace_id as u64).to_le_bytes());
-    }
-
-    // mov rax, imm64 ; helper address
-    code.push(0x48);
-    code.push(0xB8);
-    code.extend_from_slice(&(jit_bridge_entry as *const () as usize as u64).to_le_bytes());
-
-    // jmp rax ; tail-call helper (keeps caller's ABI stack shape)
-    code.push(0xFF);
-    code.push(0xE0);
-    code
-}
-
-#[cfg(target_arch = "x86_64")]
-thread_local! {
-    static JIT_BRIDGE_ERROR: std::cell::RefCell<Option<VmError>> = const { std::cell::RefCell::new(None) };
-}
-
-#[cfg(target_arch = "x86_64")]
-fn clear_jit_bridge_error() {
-    JIT_BRIDGE_ERROR.with(|slot| {
-        *slot.borrow_mut() = None;
-    });
-}
-
-#[cfg(target_arch = "x86_64")]
-fn set_jit_bridge_error(error: VmError) {
-    JIT_BRIDGE_ERROR.with(|slot| {
-        *slot.borrow_mut() = Some(error);
-    });
-}
-
-#[cfg(target_arch = "x86_64")]
-fn take_jit_bridge_error() -> Option<VmError> {
-    JIT_BRIDGE_ERROR.with(|slot| slot.borrow_mut().take())
-}
-
-#[cfg(target_arch = "x86_64")]
-extern "C" fn jit_bridge_entry(vm_ptr: *mut Vm, trace_id: usize) -> i32 {
-    if vm_ptr.is_null() {
-        set_jit_bridge_error(VmError::JitNative(
-            "native bridge received null vm pointer".to_string(),
-        ));
-        return -1;
-    }
-
-    let vm = unsafe { &mut *vm_ptr };
-    match vm.execute_jit_trace(trace_id) {
-        Ok(TraceExecOutcome::Continue) => 0,
-        Ok(TraceExecOutcome::Halted) => 1,
-        Err(err) => {
-            set_jit_bridge_error(err);
-            -1
-        }
-    }
-}
-
-impl ExecutableMemory {
-    fn from_code(code: &[u8]) -> VmResult<Self> {
-        let len = code.len();
-        if len == 0 {
-            return Err(VmError::JitNative(
-                "cannot create executable region for empty code".to_string(),
-            ));
-        }
-        let ptr = alloc_executable_region(len)?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
-        }
-        Ok(Self { ptr, len })
-    }
-}
-
-impl Drop for ExecutableMemory {
-    fn drop(&mut self) {
-        let _ = free_executable_region(self.ptr, self.len);
-    }
-}
-
-#[cfg(target_os = "windows")]
-fn alloc_executable_region(len: usize) -> VmResult<*mut u8> {
-    use windows_sys::Win32::System::Memory::{
-        MEM_COMMIT, MEM_RESERVE, PAGE_EXECUTE_READWRITE, VirtualAlloc,
-    };
-
-    let ptr = unsafe {
-        VirtualAlloc(
-            std::ptr::null_mut(),
-            len,
-            MEM_COMMIT | MEM_RESERVE,
-            PAGE_EXECUTE_READWRITE,
-        ) as *mut u8
-    };
-    if ptr.is_null() {
-        return Err(VmError::JitNative(format!(
-            "VirtualAlloc failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(ptr)
-}
-
-#[cfg(target_os = "windows")]
-fn free_executable_region(ptr: *mut u8, _len: usize) -> VmResult<()> {
-    use windows_sys::Win32::System::Memory::{MEM_RELEASE, VirtualFree};
-
-    if ptr.is_null() {
-        return Ok(());
-    }
-    let ok = unsafe { VirtualFree(ptr as *mut _, 0, MEM_RELEASE) };
-    if ok == 0 {
-        return Err(VmError::JitNative(format!(
-            "VirtualFree failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(all(unix, not(target_os = "macos")))]
-fn alloc_executable_region(len: usize) -> VmResult<*mut u8> {
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_ANON | libc::MAP_PRIVATE,
-            -1,
-            0,
-        )
-    };
-    if ptr == libc::MAP_FAILED {
-        return Err(VmError::JitNative(format!(
-            "mmap failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(ptr as *mut u8)
-}
-
-#[cfg(target_os = "macos")]
-fn alloc_executable_region(len: usize) -> VmResult<*mut u8> {
-    let ptr = unsafe {
-        libc::mmap(
-            std::ptr::null_mut(),
-            len,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
-            libc::MAP_ANON | libc::MAP_PRIVATE | libc::MAP_JIT,
-            -1,
-            0,
-        )
-    };
-    if ptr == libc::MAP_FAILED {
-        return Err(VmError::JitNative(format!(
-            "mmap(MAP_JIT) failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(ptr as *mut u8)
-}
-
-#[cfg(unix)]
-fn free_executable_region(ptr: *mut u8, len: usize) -> VmResult<()> {
-    if ptr.is_null() {
-        return Ok(());
-    }
-    let rc = unsafe { libc::munmap(ptr as *mut _, len) };
-    if rc != 0 {
-        return Err(VmError::JitNative(format!(
-            "munmap failed: {}",
-            std::io::Error::last_os_error()
-        )));
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn alloc_executable_region(_len: usize) -> VmResult<*mut u8> {
-    Err(VmError::JitNative(
-        "executable memory allocation not implemented for this platform".to_string(),
-    ))
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-fn free_executable_region(_ptr: *mut u8, _len: usize) -> VmResult<()> {
-    Ok(())
 }
