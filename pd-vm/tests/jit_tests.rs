@@ -1,6 +1,4 @@
-use vm::{
-    CallOutcome, HostFunction, JitConfig, OpCode, Value, Vm, VmStatus, compile_source,
-};
+use vm::{CallOutcome, HostFunction, JitConfig, OpCode, Value, Vm, VmStatus, compile_source};
 
 fn native_jit_supported() -> bool {
     (cfg!(target_arch = "x86_64")

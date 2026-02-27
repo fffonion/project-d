@@ -1,0 +1,22 @@
+let array_from_braces = {1, 2, 3};
+assert(len(array_from_braces) == 3);
+assert(array_from_braces[0] == 1);
+assert(array_from_braces[2] == 3);
+
+let values = [];
+values[len(values)] = 10;
+values[len(values)] = 20;
+assert(len(values) == 2);
+assert(values[0] == 10);
+values[1] = values[1] + 5;
+assert(values[1] == 25);
+
+let map = {lang: "rss", score = 7};
+assert(map.lang == "rss");
+assert(map["score"] == 7);
+map.extra = "ok";
+assert(map["extra"] == "ok");
+map[42] = 100;
+assert(map[42] == 100);
+map[true] = 1;
+assert(map[true] == 1);

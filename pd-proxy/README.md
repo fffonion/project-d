@@ -78,6 +78,7 @@ cargo run -p pd-proxy --example build_sample_program
 Alternative sample source flavors are also available:
 - `pd-proxy/examples/sample_proxy_program.js`
 - `pd-proxy/examples/sample_proxy_program.lua`
+- `pd-proxy/examples/sample_proxy_program.scm`
 
 You can pass a relative sample path explicitly, for example:
 

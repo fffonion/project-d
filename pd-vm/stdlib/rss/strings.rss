@@ -11,25 +11,21 @@ fn core_concat(lhs, rhs) {
     concat(lhs, rhs);
 }
 
-fn eq(lhs, rhs) {
-    lhs == rhs;
-}
-
 fn is_whitespace(ch) {
     let is_whitespace_value = false;
-    if eq(ch, " ") {
+    if ch == " " {
         is_whitespace_value = true;
     } else {
     }
-    if eq(ch, "\n") {
+    if ch == "\n" {
         is_whitespace_value = true;
     } else {
     }
-    if eq(ch, "\r") {
+    if ch == "\r" {
         is_whitespace_value = true;
     } else {
     }
-    if eq(ch, "\t") {
+    if ch == "\t" {
         is_whitespace_value = true;
     } else {
     }
@@ -37,7 +33,7 @@ fn is_whitespace(ch) {
 }
 
 pub fn equals(lhs, rhs) {
-    eq(lhs, rhs);
+    lhs == rhs;
 }
 
 pub fn len(value) {

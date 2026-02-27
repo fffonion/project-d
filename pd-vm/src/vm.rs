@@ -1099,7 +1099,12 @@ impl Vm {
             let native = self.native_traces.get(&trace_id).ok_or_else(|| {
                 VmError::JitNative(format!("native trace entry for id {} missing", trace_id))
             })?;
-            (native.entry, native.root_ip, native.terminal.clone(), native.has_call)
+            (
+                native.entry,
+                native.root_ip,
+                native.terminal.clone(),
+                native.has_call,
+            )
         };
 
         loop {

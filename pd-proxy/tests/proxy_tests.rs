@@ -487,18 +487,14 @@ async fn tiny_language_can_enforce_simple_rate_limit() {
     let client = reqwest::Client::new();
 
     let source = r#"
-        fn get_header(name);
-        fn set_header(name, value);
-        fn set_response_content(body);
-        fn set_upstream(addr);
-        fn rate_limit_allow(key, limit, window_seconds);
+        use vm;
 
-        if rate_limit_allow(get_header("x-client-id"), 2, 60) {
-            set_header("x-vm", "allowed");
-            set_response_content("ok");
+        if vm::rate_limit_allow(vm::get_header("x-client-id"), 2, 60) {
+            vm::set_header("x-vm", "allowed");
+            vm::set_response_content("ok");
         } else {
-            set_header("x-vm", "rate-limited");
-            set_response_content("blocked");
+            vm::set_header("x-vm", "rate-limited");
+            vm::set_response_content("blocked");
         }
     "#;
     let compiled = compile_source(source).expect("source should compile");
@@ -624,14 +620,10 @@ async fn uploaded_program_with_locals_executes_successfully() {
     let client = reqwest::Client::new();
 
     let source = r#"
-        fn get_header(name);
-        fn set_header(name, value);
-        fn set_response_content(body);
-        fn set_upstream(addr);
-        fn rate_limit_allow(key, limit, window_seconds);
+        use vm;
 
         let body = "from-local";
-        set_response_content(body);
+        vm::set_response_content(body);
     "#;
     let compiled = compile_source(source).expect("source should compile");
     assert!(

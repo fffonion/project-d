@@ -180,6 +180,9 @@ pub enum Expr {
 
 #[derive(Clone, Debug)]
 pub enum Stmt {
+    Noop {
+        line: u32,
+    },
     Let {
         index: u8,
         expr: Expr,
@@ -319,7 +322,7 @@ fn compile_parsed_output(parsed: MergedFrontendOutput) -> Result<CompiledProgram
 }
 
 fn is_compiler_primitive_import(name: &str) -> bool {
-    name.starts_with("__prim_") || name.starts_with("intrinsic_")
+    name.starts_with("__prim_")
 }
 
 pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError> {
@@ -421,6 +424,9 @@ impl Compiler {
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> Result<(), CompileError> {
         match stmt {
+            Stmt::Noop { line } => {
+                self.assembler.mark_line(*line);
+            }
             Stmt::Let { index, expr, line } => {
                 self.assembler.mark_line(*line);
                 self.compile_expr(expr)?;

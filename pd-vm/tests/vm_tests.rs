@@ -1,7 +1,7 @@
 use vm::{
     Assembler, BytecodeBuilder, CallOutcome, Compiler, Expr, HostFunction, HostFunctionRegistry,
-    Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source, compile_source_file,
-    compile_source_with_flavor,
+    Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source,
+    compile_source_file, compile_source_with_flavor,
 };
 
 struct YieldOnce {
@@ -371,6 +371,96 @@ fn compile_source_supports_static_function_pointer_binding() {
     let compiled = compile_source(source).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     vm.bind_static_function("add_one", static_add_one);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn rustscript_vm_namespace_host_calls_are_supported() {
+    let source = r#"
+        use vm;
+        vm::add_one(41);
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn rustscript_vm_named_host_imports_are_supported() {
+    let source = r#"
+        use vm::{add_one as inc};
+        inc(41);
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn rustscript_io_namespace_builtin_calls_are_supported() {
+    let source = r#"
+        io::exists(".");
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true)]);
+}
+
+#[test]
+fn rustscript_array_primitives_are_supported_without_namespace() {
+    let source = r#"
+        let values = [];
+        values[len(values)] = 7;
+        values[0] + len(values);
+    "#;
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(8)]);
+}
+
+#[test]
+fn lua_vm_require_namespace_host_calls_are_supported() {
+    let source = r#"
+        local vm = require("vm")
+        vm.add_one(41)
+    "#;
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Lua).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn lua_vm_require_member_alias_host_calls_are_supported() {
+    let source = r#"
+        local inc = require("vm").add_one
+        inc(41)
+    "#;
+    let compiled =
+        compile_source_with_flavor(source, SourceFlavor::Lua).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
 
     let status = vm.run().expect("vm should run");
     assert_eq!(status, VmStatus::Halted);

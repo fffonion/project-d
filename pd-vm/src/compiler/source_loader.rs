@@ -28,6 +28,8 @@ struct ModuleImport {
     line: usize,
 }
 
+const VM_HOST_NAMESPACE_SPEC: &str = "vm";
+
 pub(super) fn load_units_for_source_file(
     path: &Path,
     flavor: SourceFlavor,
@@ -206,6 +208,9 @@ fn rustscript_use_module_to_spec(
             line,
             message: "expected module path after 'use'".to_string(),
         });
+    }
+    if module_path == VM_HOST_NAMESPACE_SPEC {
+        return Ok(VM_HOST_NAMESPACE_SPEC.to_string());
     }
 
     let segments = module_path
@@ -967,7 +972,9 @@ fn strip_import_directives(source: &str, flavor: SourceFlavor) -> String {
         SourceFlavor::RustScript => source
             .lines()
             .map(|line| {
-                if line.trim_start().starts_with("use ") {
+                if line.trim_start().starts_with("use ")
+                    && !is_vm_use_directive_line(line.trim_start())
+                {
                     String::new()
                 } else {
                     line.to_string()
@@ -978,6 +985,24 @@ fn strip_import_directives(source: &str, flavor: SourceFlavor) -> String {
         SourceFlavor::Scheme => strip_scheme_import_directives(source),
         SourceFlavor::JavaScript | SourceFlavor::Lua => source.to_string(),
     }
+}
+
+fn is_vm_use_directive_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if !trimmed.starts_with("use ") {
+        return false;
+    }
+    let Some((directive_body, _)) = trimmed["use ".len()..].split_once(';') else {
+        return false;
+    };
+    let directive_body = directive_body.trim();
+    if directive_body == VM_HOST_NAMESPACE_SPEC {
+        return true;
+    }
+    if directive_body.starts_with("vm as ") {
+        return true;
+    }
+    directive_body.starts_with("vm::")
 }
 
 fn strip_scheme_import_directives(source: &str) -> String {

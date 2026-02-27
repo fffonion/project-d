@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinFunction;
 
@@ -15,6 +15,8 @@ enum TokenKind {
     True,
     False,
     Pub,
+    Use,
+    As,
     Fn,
     Let,
     For,
@@ -179,6 +181,8 @@ impl<'a> Lexer<'a> {
                 let ident = self.consume_ident();
                 match ident.as_str() {
                     "pub" => TokenKind::Pub,
+                    "use" => TokenKind::Use,
+                    "as" => TokenKind::As,
                     "fn" => TokenKind::Fn,
                     "let" => TokenKind::Let,
                     "for" => TokenKind::For,
@@ -367,6 +371,9 @@ pub(super) struct Parser {
     closure_capture_contexts: Vec<ClosureCaptureContext>,
     allow_implicit_externs: bool,
     loop_depth: usize,
+    vm_namespace_aliases: HashSet<String>,
+    vm_named_imports: HashMap<String, String>,
+    vm_wildcard_import: bool,
 }
 
 struct ClosureCaptureContext {
@@ -400,6 +407,9 @@ impl Parser {
             closure_capture_contexts: Vec::new(),
             allow_implicit_externs,
             loop_depth: 0,
+            vm_namespace_aliases: HashSet::new(),
+            vm_named_imports: HashMap::new(),
+            vm_wildcard_import: false,
         })
     }
 
@@ -420,6 +430,9 @@ impl Parser {
                 line: self.current_line(),
                 message: "expected 'fn' after 'pub'".to_string(),
             });
+        }
+        if self.match_kind(&TokenKind::Use) {
+            return self.parse_use_stmt();
         }
         if self.match_kind(&TokenKind::Fn) {
             return self.parse_fn_decl(false);
@@ -480,6 +493,83 @@ impl Parser {
         } else {
             Stmt::Continue { line }
         })
+    }
+
+    fn parse_use_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let line = self.last_line();
+        let namespace = self.expect_ident("expected namespace after 'use'")?;
+        if namespace != "vm" {
+            return Err(ParseError {
+                line: self.current_line(),
+                message: format!(
+                    "unsupported use namespace '{namespace}'; only 'vm' host namespace is supported here"
+                ),
+            });
+        }
+
+        if self.match_kind(&TokenKind::Semicolon) {
+            self.vm_namespace_aliases.insert("vm".to_string());
+            return Ok(Stmt::Noop { line });
+        }
+
+        if self.match_kind(&TokenKind::As) {
+            let alias = self.expect_ident("expected namespace alias after 'as'")?;
+            self.expect(&TokenKind::Semicolon, "expected ';' after use alias")?;
+            self.vm_namespace_aliases.insert(alias);
+            return Ok(Stmt::Noop { line });
+        }
+
+        if !self.match_path_separator() {
+            return Err(ParseError {
+                line: self.current_line(),
+                message: "expected ';', 'as <alias>', or '::{...}' after 'use vm'".to_string(),
+            });
+        }
+
+        if self.match_kind(&TokenKind::Star) {
+            self.vm_wildcard_import = true;
+            self.expect(&TokenKind::Semicolon, "expected ';' after 'use vm::*'")?;
+            return Ok(Stmt::Noop { line });
+        }
+
+        self.expect(&TokenKind::LBrace, "expected '{' after 'use vm::'")?;
+        if self.match_kind(&TokenKind::Star) {
+            self.vm_wildcard_import = true;
+            self.expect(&TokenKind::RBrace, "expected '}' after '*'")?;
+            self.expect(&TokenKind::Semicolon, "expected ';' after use list")?;
+            return Ok(Stmt::Noop { line });
+        }
+
+        loop {
+            let imported = self.expect_ident("expected host function name in use list")?;
+            let local = if self.match_kind(&TokenKind::As) {
+                self.expect_ident("expected local alias after 'as'")?
+            } else {
+                imported.clone()
+            };
+            if let Some(existing) = self.vm_named_imports.get(&local)
+                && existing != &imported
+            {
+                return Err(ParseError {
+                    line: self.current_line(),
+                    message: format!(
+                        "host import alias '{local}' already maps to '{existing}', cannot remap to '{imported}'"
+                    ),
+                });
+            }
+            self.vm_named_imports.insert(local, imported);
+
+            if self.match_kind(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+                continue;
+            }
+            break;
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after use list")?;
+        self.expect(&TokenKind::Semicolon, "expected ';' after use list")?;
+        Ok(Stmt::Noop { line })
     }
 
     fn parse_fn_decl(&mut self, exported: bool) -> Result<Stmt, ParseError> {
@@ -909,6 +999,31 @@ impl Parser {
             return self.parse_closure_literal();
         }
         if let Some(name) = self.match_ident() {
+            if self.match_path_separator() {
+                let member = self.expect_ident("expected function name after '::'")?;
+                self.expect(
+                    &TokenKind::LParen,
+                    "expected '(' after namespaced function name",
+                )?;
+                let args = self.parse_call_args()?;
+                if let Some(builtin) = self.resolve_builtin_namespace_call(&name, &member) {
+                    let expr = self.build_builtin_call_expr(builtin, args)?;
+                    return Ok(expr);
+                }
+                let host_name =
+                    self.resolve_vm_namespace_call_target(&name, &member)
+                        .ok_or_else(|| ParseError {
+                            line: self.current_line(),
+                            message: format!(
+                                "unknown namespace call '{}::{}'; supported namespaces are io:: (builtins) and vm:: (host imports via 'use vm;' or 'use vm as <alias>;')",
+                                name, member
+                            ),
+                        })?
+                        .to_string();
+                let expr = self.build_vm_host_call_expr(&host_name, args)?;
+                return Ok(expr);
+            }
+
             let mut expr = if self.match_kind(&TokenKind::LParen) {
                 let args = self.parse_call_args()?;
                 if let Some(closure) = self.closure_bindings.get(&name).cloned() {
@@ -941,6 +1056,9 @@ impl Parser {
                         });
                     }
                     Expr::Call(builtin.call_index(), args)
+                } else if let Some(host_name) = self.resolve_vm_direct_call_target(&name) {
+                    let host_name = host_name.to_string();
+                    self.build_vm_host_call_expr(&host_name, args)?
                 } else {
                     let decl = self.resolve_function_for_call(&name, args.len())?;
                     Expr::Call(decl.index, args)
@@ -1157,6 +1275,62 @@ impl Parser {
             });
         }
         Ok(Expr::Call(builtin.call_index(), args))
+    }
+
+    fn build_vm_host_call_expr(
+        &mut self,
+        host_name: &str,
+        args: Vec<Expr>,
+    ) -> Result<Expr, ParseError> {
+        let arity = u8::try_from(args.len()).map_err(|_| ParseError {
+            line: self.current_line(),
+            message: "function arity too large".to_string(),
+        })?;
+        let decl = self.define_vm_host_function(host_name, arity)?;
+        Ok(Expr::Call(decl.index, args))
+    }
+
+    fn resolve_vm_direct_call_target<'a>(&'a self, name: &'a str) -> Option<&'a str> {
+        if let Some(mapped) = self.vm_named_imports.get(name) {
+            return Some(mapped.as_str());
+        }
+        if self.vm_wildcard_import {
+            return Some(name);
+        }
+        None
+    }
+
+    fn resolve_vm_namespace_call_target<'a>(
+        &'a self,
+        namespace: &str,
+        member: &'a str,
+    ) -> Option<&'a str> {
+        if self.vm_namespace_aliases.contains(namespace) {
+            Some(member)
+        } else {
+            None
+        }
+    }
+
+    fn resolve_builtin_namespace_call(
+        &self,
+        namespace: &str,
+        member: &str,
+    ) -> Option<BuiltinFunction> {
+        match namespace {
+            "io" => match member {
+                "open" => Some(BuiltinFunction::IoOpen),
+                "popen" => Some(BuiltinFunction::IoPopen),
+                "read_all" => Some(BuiltinFunction::IoReadAll),
+                "read_line" => Some(BuiltinFunction::IoReadLine),
+                "write" => Some(BuiltinFunction::IoWrite),
+                "flush" => Some(BuiltinFunction::IoFlush),
+                "close" => Some(BuiltinFunction::IoClose),
+                "exists" => Some(BuiltinFunction::IoExists),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     fn parse_index_assign_with_terminator(
@@ -1486,6 +1660,44 @@ impl Parser {
         Ok(decl)
     }
 
+    fn define_vm_host_function(
+        &mut self,
+        name: &str,
+        arity: u8,
+    ) -> Result<FunctionDecl, ParseError> {
+        if let Some(existing) = self.functions.get(name) {
+            if existing.arity != arity {
+                return Err(ParseError {
+                    line: self.current_line(),
+                    message: format!("function '{name}' expects {} arguments", existing.arity),
+                });
+            }
+            return Ok(existing.clone());
+        }
+        if self.locals.contains_key(name) || self.closure_bindings.contains_key(name) {
+            return Err(ParseError {
+                line: self.current_line(),
+                message: format!("name '{name}' already used by a local binding"),
+            });
+        }
+        let index = self.next_function;
+        self.next_function = self.next_function.checked_add(1).ok_or(ParseError {
+            line: self.current_line(),
+            message: "function index overflow".to_string(),
+        })?;
+        let args = (0..arity).map(|idx| format!("arg{idx}")).collect();
+        let decl = FunctionDecl {
+            name: name.to_string(),
+            arity,
+            index,
+            args,
+            exported: false,
+        };
+        self.functions.insert(name.to_string(), decl.clone());
+        self.function_list.push(decl.clone());
+        Ok(decl)
+    }
+
     fn get_or_assign_local(&mut self, name: &str) -> Result<u8, ParseError> {
         if let Some(&index) = self.locals.get(name) {
             return Ok(index);
@@ -1507,6 +1719,31 @@ impl Parser {
     fn match_kind(&mut self, kind: &TokenKind) -> bool {
         if self.check(kind) {
             self.pos += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn check_path_separator(&self) -> bool {
+        matches!(
+            (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)),
+            (
+                Some(Token {
+                    kind: TokenKind::Colon,
+                    ..
+                }),
+                Some(Token {
+                    kind: TokenKind::Colon,
+                    ..
+                })
+            )
+        )
+    }
+
+    fn match_path_separator(&mut self) -> bool {
+        if self.check_path_separator() {
+            self.pos += 2;
             true
         } else {
             false

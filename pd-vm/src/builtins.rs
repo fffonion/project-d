@@ -106,14 +106,14 @@ impl BuiltinFunction {
 
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         match name {
-            "len" | "intrinsic_len" => Some(BuiltinFunction::Len),
-            "slice" | "intrinsic_slice" => Some(BuiltinFunction::Slice),
-            "concat" | "intrinsic_concat" => Some(BuiltinFunction::Concat),
-            "array_new" | "intrinsic_array_new" => Some(BuiltinFunction::ArrayNew),
-            "array_push" | "intrinsic_array_push" => Some(BuiltinFunction::ArrayPush),
-            "map_new" | "intrinsic_map_new" => Some(BuiltinFunction::MapNew),
-            "get" | "intrinsic_get" => Some(BuiltinFunction::Get),
-            "set" | "intrinsic_set" => Some(BuiltinFunction::Set),
+            "len" => Some(BuiltinFunction::Len),
+            "slice" => Some(BuiltinFunction::Slice),
+            "concat" => Some(BuiltinFunction::Concat),
+            "array_new" => Some(BuiltinFunction::ArrayNew),
+            "array_push" => Some(BuiltinFunction::ArrayPush),
+            "map_new" => Some(BuiltinFunction::MapNew),
+            "get" => Some(BuiltinFunction::Get),
+            "set" => Some(BuiltinFunction::Set),
             "io_open" => Some(BuiltinFunction::IoOpen),
             "io_popen" => Some(BuiltinFunction::IoPopen),
             "io_read_all" => Some(BuiltinFunction::IoReadAll),
@@ -122,7 +122,7 @@ impl BuiltinFunction {
             "io_flush" => Some(BuiltinFunction::IoFlush),
             "io_close" => Some(BuiltinFunction::IoClose),
             "io_exists" => Some(BuiltinFunction::IoExists),
-            "assert" | "intrinsic_assert" => Some(BuiltinFunction::Assert),
+            "assert" => Some(BuiltinFunction::Assert),
             _ => None,
         }
     }

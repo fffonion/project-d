@@ -1,5 +1,6 @@
 use super::super::ParseError;
 use super::{is_ident_continue, is_ident_start};
+use std::collections::HashSet;
 
 enum LuaBlock {
     If,
@@ -12,12 +13,20 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
     let cleaned_source = remove_lua_comments(source)?;
     let mut out = Vec::new();
     let mut blocks = Vec::new();
+    let mut vm_namespace_aliases = HashSet::new();
 
     for (index, raw_line) in cleaned_source.lines().enumerate() {
         let line_no = index + 1;
         let trimmed_raw = raw_line.trim();
         if trimmed_raw.is_empty() {
             out.push(String::new());
+            continue;
+        }
+        if let Some(vm_import) = lower_lua_vm_require_line(trimmed_raw) {
+            if let Some(namespace_alias) = vm_import.namespace_alias {
+                vm_namespace_aliases.insert(namespace_alias);
+            }
+            out.push(vm_import.use_stmt);
             continue;
         }
         if is_lua_require_line(trimmed_raw) {
@@ -30,7 +39,10 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("local ") {
             out.push(format!(
                 "let {};",
-                rewrite_lua_expr(rest.trim().trim_end_matches(';').trim())
+                rewrite_lua_expr(
+                    rest.trim().trim_end_matches(';').trim(),
+                    &vm_namespace_aliases
+                )
             ));
             continue;
         }
@@ -53,7 +65,10 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("if ")
             && let Some(condition) = rest.strip_suffix(" then")
         {
-            out.push(format!("if {} {{", rewrite_lua_expr(condition.trim())));
+            out.push(format!(
+                "if {} {{",
+                rewrite_lua_expr(condition.trim(), &vm_namespace_aliases)
+            ));
             blocks.push(LuaBlock::If);
             continue;
         }
@@ -61,7 +76,10 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("while ")
             && let Some(condition) = rest.strip_suffix(" do")
         {
-            out.push(format!("while {} {{", rewrite_lua_expr(condition.trim())));
+            out.push(format!(
+                "while {} {{",
+                rewrite_lua_expr(condition.trim(), &vm_namespace_aliases)
+            ));
             blocks.push(LuaBlock::While);
             continue;
         }
@@ -94,9 +112,12 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
                         .to_string(),
                 });
             }
-            let start_expr = rewrite_lua_expr(parts[0].trim());
-            let end_expr = rewrite_lua_expr(parts[1].trim());
-            let step_expr = rewrite_lua_expr(parts.get(2).map(|s| s.trim()).unwrap_or("1"));
+            let start_expr = rewrite_lua_expr(parts[0].trim(), &vm_namespace_aliases);
+            let end_expr = rewrite_lua_expr(parts[1].trim(), &vm_namespace_aliases);
+            let step_expr = rewrite_lua_expr(
+                parts.get(2).map(|s| s.trim()).unwrap_or("1"),
+                &vm_namespace_aliases,
+            );
             if step_expr.starts_with('-') {
                 return Err(ParseError {
                     line: line_no,
@@ -119,7 +140,10 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
                     message: "lua 'elseif' without matching 'if'".to_string(),
                 });
             }
-            out.push(format!("}} else if {} {{", rewrite_lua_expr(condition.trim())));
+            out.push(format!(
+                "}} else if {} {{",
+                rewrite_lua_expr(condition.trim(), &vm_namespace_aliases)
+            ));
             continue;
         }
 
@@ -159,14 +183,17 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("return ") {
             out.push(format!(
                 "{};",
-                rewrite_lua_expr(rest.trim().trim_end_matches(';').trim())
+                rewrite_lua_expr(
+                    rest.trim().trim_end_matches(';').trim(),
+                    &vm_namespace_aliases
+                )
             ));
             continue;
         }
 
         out.push(format!(
             "{};",
-            rewrite_lua_expr(trimmed.trim_end_matches(';'))
+            rewrite_lua_expr(trimmed.trim_end_matches(';'), &vm_namespace_aliases)
         ));
     }
 
@@ -189,6 +216,107 @@ fn is_lua_require_line(line: &str) -> bool {
         return rest.contains("= require(");
     }
     false
+}
+
+struct VmRequireImport {
+    use_stmt: String,
+    namespace_alias: Option<String>,
+}
+
+fn lower_lua_vm_require_line(line: &str) -> Option<VmRequireImport> {
+    let trimmed = line.trim().trim_end_matches(';').trim();
+
+    if let Some((name, rhs)) = parse_lua_local_assignment(trimmed) {
+        let (spec, remainder) = parse_lua_require_call(rhs)?;
+        if spec != "vm" {
+            return None;
+        }
+
+        if remainder.is_empty() {
+            if name == "vm" {
+                return Some(VmRequireImport {
+                    use_stmt: "use vm;".to_string(),
+                    namespace_alias: Some("vm".to_string()),
+                });
+            }
+            return Some(VmRequireImport {
+                use_stmt: format!("use vm as {name};"),
+                namespace_alias: Some(name.to_string()),
+            });
+        }
+
+        if let Some(member) = remainder.strip_prefix('.') {
+            let member = member.trim();
+            if is_valid_lua_ident(member) {
+                let use_stmt = if name == member {
+                    format!("use vm::{{{member}}};")
+                } else {
+                    format!("use vm::{{{member} as {name}}};")
+                };
+                return Some(VmRequireImport {
+                    use_stmt,
+                    namespace_alias: None,
+                });
+            }
+        }
+        return None;
+    }
+
+    let (spec, remainder) = parse_lua_require_call(trimmed)?;
+    if spec != "vm" || !remainder.is_empty() {
+        return None;
+    }
+    Some(VmRequireImport {
+        use_stmt: "use vm;".to_string(),
+        namespace_alias: Some("vm".to_string()),
+    })
+}
+
+fn parse_lua_require_call(input: &str) -> Option<(String, String)> {
+    let mut rest = input.trim().strip_prefix("require(")?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '"' && quote != '\'' {
+        return None;
+    }
+    rest = &rest[quote.len_utf8()..];
+    let mut end = None;
+    for (idx, ch) in rest.char_indices() {
+        if ch == quote {
+            end = Some(idx);
+            break;
+        }
+    }
+    let end = end?;
+    let spec = rest[..end].to_string();
+    let tail = rest[end + quote.len_utf8()..].trim_start();
+    if !tail.starts_with(')') {
+        return None;
+    }
+    let remainder = tail[1..].trim().to_string();
+    Some((spec, remainder))
+}
+
+fn is_valid_lua_ident(input: &str) -> bool {
+    let mut chars = input.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !is_ident_start(first) {
+        return false;
+    }
+    chars.all(is_ident_continue)
+}
+
+fn parse_lua_local_assignment(line: &str) -> Option<(&str, &str)> {
+    let rest = line.strip_prefix("local ")?;
+    let (name, rhs) = rest.split_once('=')?;
+    let name = name.trim();
+    let rhs = rhs.trim();
+    if is_valid_lua_ident(name) {
+        Some((name, rhs))
+    } else {
+        None
+    }
 }
 
 fn rewrite_lua_inline_function_literal(line: &str, line_no: usize) -> Result<String, ParseError> {
@@ -273,7 +401,7 @@ fn rewrite_lua_inline_function_literal(line: &str, line_no: usize) -> Result<Str
     Ok(format!("{prefix}|{params}| {body}"))
 }
 
-fn rewrite_lua_expr(expr: &str) -> String {
+fn rewrite_lua_expr(expr: &str, vm_namespace_aliases: &HashSet<String>) -> String {
     let bytes = expr.as_bytes();
     let mut out = String::with_capacity(expr.len());
     let mut i = 0usize;
@@ -316,6 +444,51 @@ fn rewrite_lua_expr(expr: &str) -> String {
                 i += 1;
             }
             let ident = &expr[start..i];
+
+            if vm_namespace_aliases.contains(ident) {
+                let mut j = i;
+                while j < bytes.len()
+                    && bytes[j].is_ascii_whitespace()
+                    && bytes[j] != b'\n'
+                    && bytes[j] != b'\r'
+                {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'.' {
+                    let mut k = j + 1;
+                    while k < bytes.len()
+                        && bytes[k].is_ascii_whitespace()
+                        && bytes[k] != b'\n'
+                        && bytes[k] != b'\r'
+                    {
+                        k += 1;
+                    }
+                    if k < bytes.len() && is_ident_start(bytes[k] as char) {
+                        let member_start = k;
+                        k += 1;
+                        while k < bytes.len() && is_ident_continue(bytes[k] as char) {
+                            k += 1;
+                        }
+                        let member = &expr[member_start..k];
+                        let mut call_check = k;
+                        while call_check < bytes.len()
+                            && bytes[call_check].is_ascii_whitespace()
+                            && bytes[call_check] != b'\n'
+                            && bytes[call_check] != b'\r'
+                        {
+                            call_check += 1;
+                        }
+                        if call_check < bytes.len() && bytes[call_check] == b'(' {
+                            out.push_str(ident);
+                            out.push_str("::");
+                            out.push_str(member);
+                            i = k;
+                            continue;
+                        }
+                    }
+                }
+            }
+
             if ident == "not" {
                 out.push('!');
             } else {

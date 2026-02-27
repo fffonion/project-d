@@ -1,15 +1,11 @@
-fn get_header(name);
-fn set_header(name, value);
-fn set_response_content(body);
-fn set_upstream(addr);
-fn rate_limit_allow(key, limit, window_seconds);
+use vm;
 
-let header = get_header("x-client-id");
+let header = vm::get_header("x-client-id");
 
-if rate_limit_allow(header, 3, 60) {
-    set_header("x-vm", "allowed");
-    set_response_content("request allowed");
+if vm::rate_limit_allow(header, 3, 60) {
+    vm::set_header("x-vm", "allowed");
+    vm::set_response_content("request allowed");
 } else {
-    set_header("x-vm", "rate-limited");
-    set_response_content("rate limit exceeded");
+    vm::set_header("x-vm", "rate-limited");
+    vm::set_response_content("rate limit exceeded");
 }

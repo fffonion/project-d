@@ -188,6 +188,7 @@ fn remap_stmt_indices(
     function_map: &HashMap<u16, u16>,
 ) -> Result<(), SourcePathError> {
     match stmt {
+        Stmt::Noop { .. } => {}
         Stmt::Let { index, expr, .. } => {
             *index = remap_local_index(*index, local_base)?;
             remap_expr_indices(expr, local_base, function_map)?;

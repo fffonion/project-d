@@ -20,17 +20,9 @@ fn run_rustscript_spec(path: &Path) -> Vec<Value> {
 }
 
 #[test]
-fn stdlib_strings_core_spec_passes() {
+fn stdlib_strings_spec_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("stdlib/tests/strings_core.rss");
-    let stack = run_rustscript_spec(&path);
-    assert_eq!(stack, Vec::<Value>::new());
-}
-
-#[test]
-fn stdlib_strings_primitives_spec_passes() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let path = root.join("stdlib/tests/strings_primitives.rss");
+    let path = root.join("stdlib/tests/strings.rss");
     let stack = run_rustscript_spec(&path);
     assert_eq!(stack, Vec::<Value>::new());
 }
@@ -39,6 +31,14 @@ fn stdlib_strings_primitives_spec_passes() {
 fn stdlib_io_primitives_spec_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("stdlib/tests/io_primitives.rss");
+    let stack = run_rustscript_spec(&path);
+    assert_eq!(stack, Vec::<Value>::new());
+}
+
+#[test]
+fn stdlib_collections_primitives_spec_passes() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("stdlib/tests/collections_primitives.rss");
     let stack = run_rustscript_spec(&path);
     assert_eq!(stack, Vec::<Value>::new());
 }

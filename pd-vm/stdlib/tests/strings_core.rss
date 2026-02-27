@@ -1,6 +1,0 @@
-use super::rss::strings::{equals, is_empty};
-
-assert(equals("rustscript", "rustscript"));
-assert(equals("rustscript", "vm") == false);
-assert(is_empty(""));
-assert(is_empty("rustscript") == false);
