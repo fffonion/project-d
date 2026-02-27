@@ -33,8 +33,8 @@ export function ProgramPalette({
     <Card
       className={
         floating
-          ? `pointer-events-auto overflow-hidden border-slate-700 bg-white/95 text-slate-900 backdrop-blur ${
-              minimized ? "w-[210px]" : "flex h-[calc(100vh-330px)] w-[320px] flex-col"
+          ? `pointer-events-auto overflow-hidden border-slate-700 bg-white/95 text-slate-900 backdrop-blur transition-[width,height,transform,box-shadow] duration-300 ease-out ${
+              minimized ? "w-[210px]" : "flex h-full min-h-0 w-[320px] flex-col"
             }`
           : "h-fit"
       }
@@ -53,42 +53,56 @@ export function ProgramPalette({
               onClick={onToggleMinimized}
               aria-label={minimized ? "Expand palette" : "Minimize palette"}
             >
-              {minimized ? <Maximize2 className="h-3.5 w-3.5" /> : <Minimize2 className="h-3.5 w-3.5" />}
+              {minimized ? (
+                <Maximize2 className="h-3.5 w-3.5 transition-transform duration-300 ease-out" />
+              ) : (
+                <Minimize2 className="h-3.5 w-3.5 transition-transform duration-300 ease-out" />
+              )}
             </Button>
           ) : null}
         </div>
       </CardHeader>
-      {floating && minimized ? null : (
-        <CardContent className={floating ? "flex-1 space-y-3 overflow-auto" : "space-y-3"}>
-          <div className="space-y-1">
-            <Label htmlFor={floating ? "block-search" : "block-search-mobile"}>Search blocks</Label>
-            <Input
-              id={floating ? "block-search" : "block-search-mobile"}
-              value={search}
-              onChange={(event) => onSearchChange(event.target.value)}
-              placeholder="if, header, rate, set..."
-            />
-          </div>
-          {definitions.map((definition) => (
-            <div
-              key={floating ? definition.id : `mobile-${definition.id}`}
-              className="cursor-grab rounded-md border bg-muted/40 p-3 active:cursor-grabbing"
-              draggable
-              onDragStart={(event) => onPaletteDragStart(event, definition.id)}
-            >
-              <div className="mb-1 flex items-center justify-between gap-2">
-                <div className="text-sm font-semibold">{definition.title}</div>
-                <Badge>{definition.category}</Badge>
-              </div>
-              <p className="mb-2 text-xs text-muted-foreground">{definition.description}</p>
-              <Button size="sm" variant="secondary" className="w-full" onClick={() => onAddNode(definition.id)}>
-                <Plus className="mr-1 h-3.5 w-3.5" />
-                Add to canvas
-              </Button>
+      <div
+        className={
+          floating
+            ? `grid min-h-0 flex-1 transition-[grid-template-rows,opacity] duration-300 ease-out ${
+                minimized ? "pointer-events-none grid-rows-[0fr] opacity-0" : "grid-rows-[1fr] opacity-100"
+              }`
+            : "grid grid-rows-[1fr]"
+        }
+      >
+        <div className="h-full min-h-0 overflow-hidden">
+          <CardContent className={floating ? "h-full space-y-3 overflow-auto" : "space-y-3"}>
+            <div className="space-y-1">
+              <Label htmlFor={floating ? "block-search" : "block-search-mobile"}>Search blocks</Label>
+              <Input
+                id={floating ? "block-search" : "block-search-mobile"}
+                value={search}
+                onChange={(event) => onSearchChange(event.target.value)}
+                placeholder="if, header, rate, set..."
+              />
             </div>
-          ))}
-        </CardContent>
-      )}
+            {definitions.map((definition) => (
+              <div
+                key={floating ? definition.id : `mobile-${definition.id}`}
+                className="cursor-grab rounded-md border bg-muted/40 p-3 active:cursor-grabbing"
+                draggable
+                onDragStart={(event) => onPaletteDragStart(event, definition.id)}
+              >
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <div className="text-sm font-semibold">{definition.title}</div>
+                  <Badge>{definition.category}</Badge>
+                </div>
+                <p className="mb-2 text-xs text-muted-foreground">{definition.description}</p>
+                <Button size="sm" variant="secondary" className="w-full" onClick={() => onAddNode(definition.id)}>
+                  <Plus className="mr-1 h-3.5 w-3.5" />
+                  Add to canvas
+                </Button>
+              </div>
+            ))}
+          </CardContent>
+        </div>
+      </div>
     </Card>
   );
 }

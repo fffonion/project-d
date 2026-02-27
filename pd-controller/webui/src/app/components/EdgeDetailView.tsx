@@ -5,7 +5,7 @@ import { LineChart, MultiLineChart } from "@/app/components/charts";
 import type { EdgeDetailResponse, ProgramSummary } from "@/app/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
 
 type EdgeDetailViewProps = {
@@ -41,10 +41,11 @@ export function EdgeDetailView({
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <div>
-              <CardTitle>Edge Detail</CardTitle>
-              <CardDescription>
+              <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Fleet Workspace</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight">Edge Detail</div>
+              <div className="mt-1 text-sm text-muted-foreground">
                 {selectedEdge ? selectedEdge.summary.edge_name : "No edge selected"}
-              </CardDescription>
+              </div>
             </div>
             <Button variant="outline" onClick={onBack} className="inline-flex items-center gap-1">
               <ArrowLeft className="h-4 w-4" />

@@ -120,7 +120,7 @@ export function toFlowEdges(edges: UiGraphEdgeWire[], nodes: FlowNode[]): FlowEd
       target: edge.target,
       targetHandle,
       data: { source_output: sourceHandle, target_input: targetHandle },
-      type: "smoothstep",
+      type: "bezier",
       animated: true,
       style: { stroke: "#22d3ee", strokeWidth: 2 }
     });

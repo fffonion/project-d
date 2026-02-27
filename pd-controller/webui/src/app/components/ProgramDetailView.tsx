@@ -12,7 +12,7 @@ import type {
   UiSourceBundle
 } from "@/app/types";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -113,12 +113,13 @@ export function ProgramDetailView({
         <CardHeader>
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
-              <CardTitle>Program Detail</CardTitle>
-              <CardDescription>
+              <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Workflow Registry</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight">Program Detail</div>
+              <div className="mt-1 text-sm text-muted-foreground">
                 {selectedProgram ? `Edit ${selectedProgram.name}` : "Program composer"}
-              </CardDescription>
+              </div>
               {selectedProgram ? (
-                <div className="font-mono text-xs text-muted-foreground">UUID: {selectedProgram.program_id}</div>
+                <div className="mt-1 font-mono text-xs text-muted-foreground">UUID: {selectedProgram.program_id}</div>
               ) : null}
             </div>
             <Button

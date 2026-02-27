@@ -3,7 +3,7 @@ import { Activity, ChevronRight, Circle } from "lucide-react";
 import { edgeHealth, edgeHealthClasses, formatNumber, formatUnixMs, syncStatusClasses } from "@/app/helpers";
 import type { EdgeSummary } from "@/app/types";
 import { Badge } from "@/components/ui/badge";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 type EdgeStats = {
@@ -32,8 +32,9 @@ export function EdgeListView({
     <div className="space-y-4">
       <Card className="border-slate-200/80 bg-white/80 backdrop-blur">
         <CardHeader className="pb-3">
-          <CardTitle>Edges</CardTitle>
-          <CardDescription>Connected workers, health, and rollout status.</CardDescription>
+          <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Fleet Overview</div>
+          <div className="mt-1 text-2xl font-semibold tracking-tight">Edges</div>
+          <div className="mt-1 text-sm text-muted-foreground">Connected workers, health, and rollout status.</div>
         </CardHeader>
         <CardContent className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <div className="rounded-md border bg-background/70 p-3">
@@ -57,11 +58,7 @@ export function EdgeListView({
 
       <Card className="border-slate-200/80 bg-white/80 backdrop-blur">
         <CardHeader className="pb-3">
-          <div className="flex items-center justify-between gap-3">
-            <div>
-              <CardTitle>Fleet List</CardTitle>
-              <CardDescription>Click a row to open edge detail.</CardDescription>
-            </div>
+          <div className="flex items-center justify-end gap-3">
             <div className="relative w-full max-w-[320px]">
               <Input
                 value={edgeSearch}

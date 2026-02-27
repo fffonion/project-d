@@ -15,7 +15,7 @@ import { nodeTypes } from "@/app/components/BlockNode";
 import { GeneratedCodePanel } from "@/app/components/GeneratedCodePanel";
 import { ProgramPalette } from "@/app/components/ProgramPalette";
 import type { FlowEdge, FlowNode, SourceFlavor, UiBlockDefinition, UiSourceBundle } from "@/app/types";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent, CardHeader } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 
 type ProgramComposerWorkspaceProps = {
@@ -85,14 +85,15 @@ export function ProgramComposerWorkspace({
 }: ProgramComposerWorkspaceProps) {
   if (isCodeEditMode) {
     return (
-      <Card className="border-slate-200/80 bg-white/90 shadow-xl backdrop-blur">
+      <Card className="pd-panel-enter border-slate-200/80 bg-white/90 shadow-xl backdrop-blur">
         <CardHeader>
           <div className="flex items-center justify-between gap-3">
             <div>
-              <CardTitle>Code</CardTitle>
-              <CardDescription>
+              <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Source Editor</div>
+              <div className="mt-1 text-2xl font-semibold tracking-tight">Code</div>
+              <div className="mt-1 text-sm text-muted-foreground">
                 Code edit mode. This version is saved as source-only and does not keep flow graph state.
-              </CardDescription>
+              </div>
             </div>
             <Button variant="outline" onClick={onExitCodeEditMode}>
               Exit Edit
@@ -106,7 +107,7 @@ export function ProgramComposerWorkspace({
             source={source}
             onFlavorChange={onFlavorChange}
             readOnly={false}
-            editorHeight="calc(100vh - 360px)"
+            editorHeight="calc(100dvh - 360px)"
             onCodeChange={onSourceChange}
             showHeader={false}
           />
@@ -119,7 +120,7 @@ export function ProgramComposerWorkspace({
     <>
       <div className="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-950 text-slate-100 shadow-xl">
         <div
-          className="h-[calc(100vh-290px)] min-h-[760px] w-full"
+          className="h-[calc(100dvh-320px)] min-h-[420px] w-full"
           onDragOver={(event) => event.preventDefault()}
           onDrop={onCanvasDrop}
         >
@@ -138,7 +139,7 @@ export function ProgramComposerWorkspace({
             fitView
             fitViewOptions={{ padding: 0.35 }}
             defaultEdgeOptions={{
-              type: "smoothstep",
+              type: "bezier",
               animated: true,
               style: { stroke: "#22d3ee", strokeWidth: 2 }
             }}
@@ -154,7 +155,7 @@ export function ProgramComposerWorkspace({
           </ReactFlow>
         </div>
 
-        <div className="pointer-events-none absolute left-4 top-4 z-20 hidden xl:block">
+        <div className="pointer-events-none absolute bottom-12 left-4 top-4 z-20 hidden xl:block">
           <ProgramPalette
             floating
             minimized={paletteMinimized}
@@ -167,7 +168,7 @@ export function ProgramComposerWorkspace({
           />
         </div>
 
-        <div className="pointer-events-none absolute right-4 top-4 z-20 hidden xl:block">
+        <div className="pointer-events-none absolute bottom-12 right-4 top-4 z-20 hidden xl:block">
           <GeneratedCodePanel
             floating
             minimized={codePanelMinimized}

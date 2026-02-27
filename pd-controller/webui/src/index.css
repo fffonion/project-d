@@ -51,3 +51,24 @@ body {
   background-repeat: no-repeat;
   background-size: 12px 12px;
 }
+
+@keyframes pd-panel-enter {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.995);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.pd-panel-enter {
+  animation: pd-panel-enter 220ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pd-panel-enter {
+    animation: none;
+  }
+}

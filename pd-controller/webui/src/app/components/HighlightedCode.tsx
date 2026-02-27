@@ -20,7 +20,7 @@ export function HighlightedCode({
   const code = source[flavor] ?? "";
 
   return (
-    <div className="overflow-auto rounded-md border border-border">
+    <div className="h-full overflow-auto rounded-md border border-border">
       <Editor
         height={height}
         language={language}

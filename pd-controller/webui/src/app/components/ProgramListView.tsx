@@ -6,8 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 type ProgramListViewProps = {
-  newProgramName: string;
-  onNewProgramNameChange: (value: string) => void;
   creatingProgram: boolean;
   onCreateProgram: () => void;
   programSearch: string;
@@ -17,8 +15,6 @@ type ProgramListViewProps = {
 };
 
 export function ProgramListView({
-  newProgramName,
-  onNewProgramNameChange,
   creatingProgram,
   onCreateProgram,
   programSearch,
@@ -29,31 +25,19 @@ export function ProgramListView({
   return (
     <div className="space-y-4">
       <div className="rounded-xl border border-slate-200/80 bg-white/80 px-4 py-4 backdrop-blur lg:px-6">
-        <div className="flex flex-wrap items-center justify-between gap-4">
-          <div>
-            <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Workflow Registry</div>
-            <div className="mt-1 text-2xl font-semibold tracking-tight">Programs</div>
-            <div className="mt-1 text-sm text-muted-foreground">Store, version, and open workflows for editing.</div>
-          </div>
-          <div className="grid w-full gap-2 sm:max-w-[520px] sm:grid-cols-[1fr_auto]">
-            <Input
-              id="new-program-name"
-              value={newProgramName}
-              onChange={(event) => onNewProgramNameChange(event.target.value)}
-              placeholder="new-program-name"
-              className="h-10"
-            />
-            <Button onClick={onCreateProgram} disabled={creatingProgram}>
-              <Plus className="mr-1 h-4 w-4" />
-              {creatingProgram ? "Creating" : "Create Program"}
-            </Button>
-          </div>
+        <div>
+          <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Workflow Registry</div>
+          <div className="mt-1 text-2xl font-semibold tracking-tight">Programs</div>
+          <div className="mt-1 text-sm text-muted-foreground">Store, version, and open workflows for editing.</div>
         </div>
       </div>
 
       <section className="rounded-xl border border-slate-200/80 bg-white/80 p-4 backdrop-blur">
         <div className="mb-3 flex items-center justify-between gap-3">
-          <div className="text-sm font-medium text-slate-700">Program Table</div>
+          <Button onClick={onCreateProgram} disabled={creatingProgram}>
+            <Plus className="mr-1 h-4 w-4" />
+            {creatingProgram ? "Creating" : "Create Program"}
+          </Button>
           <Input
             value={programSearch}
             onChange={(event) => onProgramSearchChange(event.target.value)}
