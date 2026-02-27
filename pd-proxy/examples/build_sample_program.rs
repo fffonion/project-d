@@ -1,8 +1,8 @@
 use std::{io, path::PathBuf};
 
-use proxy::{ABI_VERSION, FUNCTIONS, HOST_FUNCTION_COUNT};
+use proxy::{ABI_VERSION, HOST_FUNCTION_COUNT, function_by_name};
 use reqwest::StatusCode;
-use vm::{FunctionDecl, compile_source_file, encode_program, validate_program};
+use vm::{HostImport, compile_source_file, encode_program, validate_program};
 
 const SOURCE_PATH: &str = "examples/sample_proxy_program.rss";
 const CONTROL_URL: &str = "http://127.0.0.1:8081/program";
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source_rel);
     let compiled = compile_source_file(&source_path)?;
 
-    ensure_proxy_abi(&compiled.functions)?;
+    ensure_proxy_abi(&compiled.program.imports)?;
     validate_program(&compiled.program, HOST_FUNCTION_COUNT)?;
 
     let payload = encode_program(&compiled.program)?;
@@ -44,22 +44,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn ensure_proxy_abi(functions: &[FunctionDecl]) -> Result<(), io::Error> {
-    for function in FUNCTIONS {
-        let index = function.index;
-        let Some(actual) = functions.get(index as usize) else {
+fn ensure_proxy_abi(imports: &[HostImport]) -> Result<(), io::Error> {
+    for import in imports {
+        let Some(abi) = function_by_name(&import.name) else {
             return Err(io::Error::other(format!(
-                "source missing required function declaration at index {index}: {}",
-                function.name
+                "unknown proxy host import '{}'",
+                import.name
             )));
         };
-        if actual.name != function.name
-            || actual.arity != function.arity
-            || actual.index != function.index
-        {
+        if import.arity != abi.arity {
             return Err(io::Error::other(format!(
-                "function ABI mismatch at index {index}: expected {}/{}, got {}/{}",
-                function.name, function.arity, actual.name, actual.arity
+                "function ABI mismatch for '{}': expected arity {}, got {}",
+                abi.name, abi.arity, import.arity
             )));
         }
     }

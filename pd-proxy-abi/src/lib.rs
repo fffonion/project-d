@@ -43,12 +43,25 @@ pub const FUNCTIONS: [AbiFunction; 5] = [
 
 pub const HOST_FUNCTION_COUNT: u16 = FUNCTIONS.len() as u16;
 
+fn functions_by_name() -> &'static std::collections::HashMap<&'static str, &'static AbiFunction> {
+    static LOOKUP: std::sync::OnceLock<
+        std::collections::HashMap<&'static str, &'static AbiFunction>,
+    > = std::sync::OnceLock::new();
+    LOOKUP.get_or_init(|| {
+        let mut map = std::collections::HashMap::with_capacity(FUNCTIONS.len());
+        for function in FUNCTIONS.iter() {
+            map.insert(function.name, function);
+        }
+        map
+    })
+}
+
 pub fn function_by_index(index: u16) -> Option<&'static AbiFunction> {
     FUNCTIONS.iter().find(|function| function.index == index)
 }
 
 pub fn function_by_name(name: &str) -> Option<&'static AbiFunction> {
-    FUNCTIONS.iter().find(|function| function.name == name)
+    functions_by_name().get(name).copied()
 }
 
 pub fn abi_json() -> &'static str {

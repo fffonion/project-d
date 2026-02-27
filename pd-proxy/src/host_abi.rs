@@ -7,9 +7,6 @@ use std::{
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use vm::{CallOutcome, HostFunction, Value, Vm, VmError};
 
-use crate::{
-    FN_GET_HEADER, FN_RATE_LIMIT_ALLOW, FN_SET_HEADER, FN_SET_RESPONSE_CONTENT, FN_SET_UPSTREAM,
-};
 
 pub type SharedRateLimiter = Arc<Mutex<RateLimiterStore>>;
 
@@ -103,31 +100,26 @@ pub fn snapshot_execution_outcome(context: &SharedProxyVmContext) -> VmExecution
 }
 
 pub fn register_host_module(vm: &mut Vm, context: SharedProxyVmContext) -> Result<(), VmError> {
-    register_checked(
-        vm,
-        FN_GET_HEADER,
+    vm.bind_function(
+        "get_header",
         Box::new(GetHeaderFunction::new(context.clone())),
-    )?;
-    register_checked(
-        vm,
-        FN_SET_HEADER,
+    );
+    vm.bind_function(
+        "set_header",
         Box::new(SetHeaderFunction::new(context.clone())),
-    )?;
-    register_checked(
-        vm,
-        FN_SET_RESPONSE_CONTENT,
+    );
+    vm.bind_function(
+        "set_response_content",
         Box::new(SetResponseContentFunction::new(context.clone())),
-    )?;
-    register_checked(
-        vm,
-        FN_SET_UPSTREAM,
+    );
+    vm.bind_function(
+        "set_upstream",
         Box::new(SetUpstreamFunction::new(context.clone())),
-    )?;
-    register_checked(
-        vm,
-        FN_RATE_LIMIT_ALLOW,
+    );
+    vm.bind_function(
+        "rate_limit_allow",
         Box::new(RateLimitAllowFunction::new(context)),
-    )?;
+    );
     Ok(())
 }
 
@@ -288,21 +280,6 @@ fn expect_int(args: &[Value], index: usize) -> Result<i64, VmError> {
     }
 }
 
-fn register_checked(
-    vm: &mut Vm,
-    expected_index: u16,
-    function: Box<dyn HostFunction>,
-) -> Result<(), VmError> {
-    let actual_index = vm.register_function(function);
-    if actual_index == expected_index {
-        Ok(())
-    } else {
-        Err(VmError::HostError(format!(
-            "proxy host module registration order mismatch: expected index {expected_index}, got {actual_index}",
-        )))
-    }
-}
-
 fn is_valid_upstream(value: &str) -> bool {
     if value.is_empty()
         || value.contains("://")
@@ -350,12 +327,12 @@ mod tests {
     }
 
     #[test]
-    fn register_host_module_requires_expected_indices() {
+    fn register_host_module_allows_preexisting_bindings() {
         let mut vm = dummy_vm();
         vm.register_function(Box::new(NoopFunction));
 
         let result = register_host_module(&mut vm, empty_context());
-        assert!(matches!(result, Err(VmError::HostError(_))));
+        assert!(result.is_ok());
     }
 
     #[test]
