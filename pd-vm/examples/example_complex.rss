@@ -1,14 +1,14 @@
-import * as string from "../stdlib/rss/strings.rss";
+use super::stdlib::rss::strings as string;
 
 fn add_one(x);
 
-// Complex RustScript example with closure capture, stdlib import, and host calls.
+// Complex RustScript example with closure capture, stdlib module use, and host calls.
 let total = 0;
 for (let i = 0; i < 4; i = i + 1) {
     total = total + i;
 }
 
-if string.non_empty("rustscript") {
+if string::non_empty("rustscript") {
     total = add_one(total);
 } else {
     total = 0;

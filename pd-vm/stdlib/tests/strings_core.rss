@@ -1,4 +1,4 @@
-import { equals, is_empty } from "../rss/strings.rss";
+use super::rss::strings::{equals, is_empty};
 
 let ok = true;
 

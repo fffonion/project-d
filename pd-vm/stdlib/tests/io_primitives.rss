@@ -1,22 +1,22 @@
-import * as io from "../rss/io.rss";
-import * as string from "../rss/strings.rss";
+use super::rss::io as io;
+use super::rss::strings as string;
 
 let ok = true;
 
-if io.exists("stdlib/rss/io.rss") {
+if io::exists("stdlib/rss/io.rss") {
 } else {
     ok = false;
 }
 
-let handle = io.popen("echo rustscript_io_builtin", "r");
-let output = io.read_all(handle);
-let closed = io.close(handle);
+let handle = io::popen("echo rustscript_io_builtin", "r");
+let output = io::read_all(handle);
+let closed = io::close(handle);
 if closed {
 } else {
     ok = false;
 }
 
-if string.contains(output, "rustscript_io_builtin") {
+if string::contains(output, "rustscript_io_builtin") {
 } else {
     ok = false;
 }

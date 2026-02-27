@@ -683,7 +683,8 @@ fn lua_print_works_without_decl() {
 
 #[test]
 fn compile_source_file_with_rustscript_complex_fixture() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.rss");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.rss");
     let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
@@ -744,7 +745,8 @@ fn compile_source_file_with_javascript_complex_fixture() {
 
 #[test]
 fn compile_source_file_with_lua_complex_fixture() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.lua");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.lua");
     let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
@@ -763,7 +765,8 @@ fn compile_source_file_with_lua_complex_fixture() {
 
 #[test]
 fn compile_source_file_with_scheme_complex_fixture() {
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.scm");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.scm");
     let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
@@ -987,7 +990,7 @@ fn compile_source_file_rustscript_imports_merge_with_scoped_locals() {
     std::fs::write(
         &main_path,
         r#"
-        import "./module.rss";
+        use module;
         let shared = add_one(1);
         shared;
     "#,
@@ -1017,6 +1020,38 @@ fn compile_source_file_rustscript_imports_merge_with_scoped_locals() {
 
     let _ = std::fs::remove_file(main_path);
     let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_rustscript_rejects_import_keyword() {
+    let unique = format!(
+        "vm_rss_use_keyword_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+    let main_path = root.join("main.rss");
+    std::fs::write(&main_path, "import \"./module.rss\";\n1;\n").expect("source should write");
+
+    let err = match compile_source_file(&main_path) {
+        Ok(_) => panic!("legacy import syntax should be rejected for RustScript"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err,
+            vm::SourcePathError::InvalidImportSyntax { ref message, .. }
+            if message.contains("uses 'use', not 'import'")
+        ),
+        "expected use-keyword guidance, got {err:?}"
+    );
+
+    let _ = std::fs::remove_file(main_path);
     let _ = std::fs::remove_dir(root);
 }
 
@@ -1371,10 +1406,10 @@ fn compile_source_file_rustscript_supports_namespace_and_named_imports() {
     std::fs::write(
         &main_path,
         r#"
-        import * as string from "./strings.rss";
-        import { is_empty as is_empty } from "./strings.rss";
+        use strings as string;
+        use strings::{is_empty as is_empty};
 
-        string.non_empty("rss");
+        string::non_empty("rss");
         is_empty("");
     "#,
     )
@@ -1427,7 +1462,7 @@ fn compile_source_file_rustscript_named_import_is_selective() {
     std::fs::write(
         &main_path,
         r#"
-        import { add_one } from "./module.rss";
+        use module::{add_one};
         add_two(40);
     "#,
     )
@@ -1482,7 +1517,7 @@ fn compile_source_file_rustscript_module_exports_only_pub_functions() {
     std::fs::write(
         &ok_main_path,
         r#"
-        import "./module.rss";
+        use module;
         public_add(41);
     "#,
     )
@@ -1501,7 +1536,7 @@ fn compile_source_file_rustscript_module_exports_only_pub_functions() {
     std::fs::write(
         &bad_main_path,
         r#"
-        import "./module.rss";
+        use module;
         private_add(41);
     "#,
     )
@@ -1541,9 +1576,9 @@ fn compile_source_file_rejects_import_cycles() {
     let main_path = root.join("main.rss");
     let a_path = root.join("a.rss");
     let b_path = root.join("b.rss");
-    std::fs::write(&main_path, "import \"./a.rss\";\n1;\n").expect("main source should write");
-    std::fs::write(&a_path, "import \"./b.rss\";\n").expect("module a source should write");
-    std::fs::write(&b_path, "import \"./a.rss\";\n").expect("module b source should write");
+    std::fs::write(&main_path, "use a;\n1;\n").expect("main source should write");
+    std::fs::write(&a_path, "use b;\n").expect("module a source should write");
+    std::fs::write(&b_path, "use a;\n").expect("module b source should write");
 
     let err = match compile_source_file(&main_path) {
         Ok(_) => panic!("cycle should fail"),

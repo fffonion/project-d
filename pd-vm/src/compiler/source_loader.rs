@@ -92,67 +92,186 @@ fn parse_rustscript_imports(
     for (idx, raw_line) in source.lines().enumerate() {
         let line_no = idx + 1;
         let line = raw_line.trim();
-        if !line.starts_with("import ") {
-            continue;
-        }
-        let tail = line["import ".len()..].trim();
-        if tail.starts_with('"') || tail.starts_with('\'') {
-            let (spec, rest) = extract_quoted_literal(tail).ok_or_else(|| {
-                SourcePathError::InvalidImportSyntax {
-                    path: path.to_path_buf(),
-                    line: line_no,
-                    message: "expected quoted module path after 'import'".to_string(),
-                }
-            })?;
-            if !rest.trim().starts_with(';') {
-                return Err(SourcePathError::InvalidImportSyntax {
-                    path: path.to_path_buf(),
-                    line: line_no,
-                    message: "expected ';' after import path".to_string(),
-                });
-            }
-            imports.push(ModuleImport {
-                spec: spec.to_string(),
-                clause: ImportClause::AllPublic,
-                line: line_no,
-            });
-            continue;
-        }
-
-        let (head, from_tail) =
-            tail.split_once(" from ")
-                .ok_or_else(|| SourcePathError::InvalidImportSyntax {
-                    path: path.to_path_buf(),
-                    line: line_no,
-                    message: "expected import clause followed by 'from \"...\";'".to_string(),
-                })?;
-        let clause =
-            parse_import_clause_head(head).ok_or_else(|| SourcePathError::InvalidImportSyntax {
-                path: path.to_path_buf(),
-                line: line_no,
-                message: "unsupported import clause".to_string(),
-            })?;
-        let (spec, rest) = extract_quoted_literal(from_tail).ok_or_else(|| {
-            SourcePathError::InvalidImportSyntax {
-                path: path.to_path_buf(),
-                line: line_no,
-                message: "expected quoted module path after 'from'".to_string(),
-            }
-        })?;
-        if !rest.trim().starts_with(';') {
+        if line.starts_with("import ") {
             return Err(SourcePathError::InvalidImportSyntax {
                 path: path.to_path_buf(),
                 line: line_no,
-                message: "expected ';' after import path".to_string(),
+                message: "RustScript uses 'use', not 'import'".to_string(),
             });
         }
+        if !line.starts_with("use ") {
+            continue;
+        }
+        let tail = line["use ".len()..].trim();
+        let (spec, clause) = parse_rustscript_use(path, line_no, tail)?;
         imports.push(ModuleImport {
-            spec: spec.to_string(),
+            spec,
             clause,
             line: line_no,
         });
     }
     Ok(imports)
+}
+
+fn parse_rustscript_use(
+    path: &Path,
+    line: usize,
+    tail: &str,
+) -> Result<(String, ImportClause), SourcePathError> {
+    let Some((directive_body, _)) = tail.split_once(';') else {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "expected ';' at end of use directive".to_string(),
+        });
+    };
+    let directive_body = directive_body.trim();
+    if directive_body.is_empty() {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "expected module path after 'use'".to_string(),
+        });
+    }
+
+    if let Some(module_path) = directive_body.strip_suffix("::*") {
+        let spec = rustscript_use_module_to_spec(path, line, module_path.trim())?;
+        return Ok((spec, ImportClause::AllPublic));
+    }
+
+    if let Some(open_idx) = directive_body.find("::{") {
+        if !directive_body.ends_with('}') {
+            return Err(SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message: "expected '}' to close use list".to_string(),
+            });
+        }
+        let module_path = directive_body[..open_idx].trim();
+        let spec = rustscript_use_module_to_spec(path, line, module_path)?;
+        let inner = directive_body[open_idx + 3..directive_body.len() - 1].trim();
+        if inner == "*" {
+            return Ok((spec, ImportClause::AllPublic));
+        }
+        if inner.is_empty() {
+            return Err(SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message: "use list requires at least one symbol".to_string(),
+            });
+        }
+        let named =
+            parse_named_imports(inner).ok_or_else(|| SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message:
+                    "invalid use list; expected comma-separated names with optional 'as' aliases"
+                        .to_string(),
+            })?;
+        if named.is_empty() {
+            return Err(SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message: "use list requires at least one symbol".to_string(),
+            });
+        }
+        return Ok((spec, ImportClause::Named(named)));
+    }
+
+    if let Some((module_path, alias)) = directive_body.rsplit_once(" as ") {
+        let spec = rustscript_use_module_to_spec(path, line, module_path.trim())?;
+        let alias = alias.trim();
+        if !is_valid_ident(alias) {
+            return Err(SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message: "invalid namespace alias in use directive".to_string(),
+            });
+        }
+        return Ok((spec, ImportClause::Namespace(alias.to_string())));
+    }
+
+    let spec = rustscript_use_module_to_spec(path, line, directive_body)?;
+    Ok((spec, ImportClause::AllPublic))
+}
+
+fn rustscript_use_module_to_spec(
+    path: &Path,
+    line: usize,
+    module_path: &str,
+) -> Result<String, SourcePathError> {
+    if module_path.is_empty() {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "expected module path after 'use'".to_string(),
+        });
+    }
+
+    let segments = module_path
+        .split("::")
+        .map(|segment| segment.trim())
+        .collect::<Vec<_>>();
+    if segments.iter().any(|segment| segment.is_empty()) {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "invalid module path in use directive".to_string(),
+        });
+    }
+
+    let mut path_prefix = PathBuf::new();
+    let mut cursor = 0usize;
+    while cursor < segments.len() {
+        match segments[cursor] {
+            "self" => cursor += 1,
+            "super" => {
+                path_prefix.push("..");
+                cursor += 1;
+            }
+            "crate" => {
+                return Err(SourcePathError::InvalidImportSyntax {
+                    path: path.to_path_buf(),
+                    line,
+                    message: "crate:: paths are not supported; use relative module paths"
+                        .to_string(),
+                });
+            }
+            _ => break,
+        }
+    }
+
+    if cursor >= segments.len() {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "expected module name after path qualifiers".to_string(),
+        });
+    }
+
+    for segment in &segments[cursor..] {
+        if !is_valid_ident(segment) {
+            return Err(SourcePathError::InvalidImportSyntax {
+                path: path.to_path_buf(),
+                line,
+                message: format!("invalid module path segment '{segment}' in use directive"),
+            });
+        }
+        path_prefix.push(segment);
+    }
+
+    let mut spec = path_prefix.to_string_lossy().replace('\\', "/");
+    if spec.is_empty() {
+        return Err(SourcePathError::InvalidImportSyntax {
+            path: path.to_path_buf(),
+            line,
+            message: "expected module path after 'use'".to_string(),
+        });
+    }
+    if !spec.ends_with(".rss") {
+        spec.push_str(".rss");
+    }
+    Ok(spec)
 }
 
 fn parse_js_imports(source: &str) -> Vec<ModuleImport> {
@@ -848,7 +967,7 @@ fn strip_import_directives(source: &str, flavor: SourceFlavor) -> String {
         SourceFlavor::RustScript => source
             .lines()
             .map(|line| {
-                if line.trim_start().starts_with("import ") {
+                if line.trim_start().starts_with("use ") {
                     String::new()
                 } else {
                     line.to_string()
@@ -1081,6 +1200,7 @@ fn rewrite_imported_call_sites(
     } else {
         Ok(rewrite_function_call_paths(
             source,
+            flavor,
             &alias_calls,
             &namespace_calls,
         ))
@@ -1089,6 +1209,7 @@ fn rewrite_imported_call_sites(
 
 fn rewrite_function_call_paths(
     source: &str,
+    flavor: SourceFlavor,
     alias_calls: &HashMap<String, String>,
     namespace_calls: &HashMap<String, HashSet<String>>,
 ) -> String {
@@ -1178,8 +1299,27 @@ fn rewrite_function_call_paths(
                 {
                     j += 1;
                 }
-                if j < bytes.len() && bytes[j] == b'.' {
-                    let mut k = j + 1;
+
+                let mut sep_end = None;
+                if flavor == SourceFlavor::RustScript {
+                    if j < bytes.len() && bytes[j] == b':' {
+                        let mut k = j + 1;
+                        while k < bytes.len()
+                            && bytes[k].is_ascii_whitespace()
+                            && bytes[k] != b'\n'
+                            && bytes[k] != b'\r'
+                        {
+                            k += 1;
+                        }
+                        if k < bytes.len() && bytes[k] == b':' {
+                            sep_end = Some(k + 1);
+                        }
+                    }
+                } else if j < bytes.len() && bytes[j] == b'.' {
+                    sep_end = Some(j + 1);
+                }
+
+                if let Some(mut k) = sep_end {
                     while k < bytes.len()
                         && bytes[k].is_ascii_whitespace()
                         && bytes[k] != b'\n'

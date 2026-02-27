@@ -1,5 +1,5 @@
-import { equals, len, contains, split, trim, replace } from "../rss/strings.rss";
-import { array_len, array_get } from "../rss/arrays.rss";
+use super::rss::strings::{equals, len, contains, split, trim, replace};
+use super::rss::arrays::{array_len, array_get};
 
 let ok = true;
 
