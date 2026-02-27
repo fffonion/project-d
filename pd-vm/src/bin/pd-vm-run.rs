@@ -123,6 +123,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     let mut cfg = CliConfig::default();
+    if args.is_empty() {
+        cfg.repl = true;
+        return Ok(cfg);
+    }
     let mut index = 0usize;
 
     if let Some(first) = args.first()
@@ -293,6 +297,7 @@ fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) -> Result<(), io:
 
 fn print_usage() {
     println!("Usage:");
+    println!("  pd-vm-run                  (defaults to REPL)");
     println!("  pd-vm-run [source_path]");
     println!("  pd-vm-run --repl");
     println!("  pd-vm-run repl");
@@ -629,7 +634,7 @@ mod tests {
     #[test]
     fn parse_cli_defaults() {
         let cfg = parse_cli_args(&[]).expect("parse should succeed");
-        assert!(!cfg.repl);
+        assert!(cfg.repl);
         assert!(!cfg.debug);
         assert!(cfg.tcp_addr.is_none());
         assert!(cfg.stop_on_entry);
