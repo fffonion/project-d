@@ -1,62 +1,72 @@
 # project-d
 
-`project-d` is a Rust workspace for a programmable HTTP proxy powered by a stack-based VM.
+`project-d` is a Rust workspace for programmable edge data planes driven by a VM and a central controller.
 
-## Workspace crates
+## Workspace layout
 
-- `pd-vm`: VM runtime, assembler, source compiler (`.rss`, `.js`, `.lua`, `.scm`), debugger, and trace JIT.
-- `pd-edge`: HTTP proxy runtime with a local admin endpoint for uploading VM programs and optional debug sessions.
-- `pd-controller`: control-plane server that queues commands for active edges and receives RPC results.
-- `pd-edge-abi`: shared ABI contract (Rust constants + `abi.json`) used by the proxy host-call layer.
-
-`pd-controller/webui` contains the React + shadcn web UI for visual block composition and deploy.
+- `pd-vm`: VM runtime, compiler (`.rss`, `.js`, `.lua`, `.scm`), debugger, and tools.
+- `pd-edge-abi`: ABI contract shared by VM host functions and edge runtime.
+- `pd-edge`: edge data plane runtime (data listener + local admin endpoint + active control-plane RPC client).
+- `pd-controller`: control plane service (RPC endpoints, state persistence, program/version management, remote debug orchestration, and Web UI at `/ui`).
 
 ## Prerequisites
 
-- Rust toolchain with 2024 edition support
+- Rust (edition 2024 compatible toolchain)
 - Bun (for `pd-controller/webui`)
-- PowerShell (examples below use PowerShell syntax)
 
-## Quick start
-
-Build everything:
+## Build and test
 
 ```powershell
 cargo build --workspace
-```
-
-Run all tests:
-
-```powershell
 cargo test --workspace
 ```
 
-Run VM example:
+## Local end-to-end quick start
+
+1. Build Web UI assets (embedded into `pd-controller` binary):
 
 ```powershell
-cargo run -p pd-vm --bin pd-vm-run -- pd-vm/examples/example.rss
+cd pd-controller/webui
+bun install
+bun run build
+cd ../..
 ```
 
-Start proxy:
+2. Start controller:
 
 ```powershell
-cargo run -p pd-edge
+cargo run -p pd-controller
 ```
 
-In another terminal, compile and upload the sample proxy program:
+3. Start one edge that actively connects to controller:
 
 ```powershell
-cargo run -p pd-edge --example build_sample_program
+cargo run -p pd-edge -- --control-plane-url "http://127.0.0.1:9100" --edge-name "edge-local-1"
 ```
 
-Then send a request through the data plane:
+4. Open controller Web UI:
 
-```powershell
-curl -i "http://127.0.0.1:8080/anything" -H "x-client-id: demo-client"
+```text
+http://127.0.0.1:9100/ui
 ```
 
-## More details
+## Key runtime behavior
 
-- VM docs and examples: `pd-vm/README.md`
-- Proxy runtime and admin endpoint usage: `pd-edge/README.md`
+- Edge identity:
+  - UUID is generated/persisted at `.pd-edge/edge-id` by default, or can be set with `--edge-id`.
+  - Friendly name defaults to hostname, or can be set with `--edge-name`.
+- Edge local listeners:
+  - Data plane: `--data-addr` (default `0.0.0.0:8080`)
+  - Admin endpoint: `--admin-addr` (default `127.0.0.1:8081`)
+  - Program size limit: `--max-program-bytes` (default `1048576`)
+- Controller persistence (default base path `.pd-controller/state.json`) is split as:
+  - core: `state.json`
+  - programs: `state.programs.json`
+  - timeseries: `state.timeseries.bin`
+
+## Useful docs
+
+- [pd-controller README](pd-controller/README.md)
+- [pd-edge README](pd-edge/README.md)
+- [pd-vm README](pd-vm/README.md)
 - ABI manifest: `pd-edge-abi/abi.json`

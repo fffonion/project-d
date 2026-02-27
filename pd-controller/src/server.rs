@@ -19,10 +19,14 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use edge::{
-    ControlPlaneCommand, EdgeCommandResult, EdgePollRequest, EdgePollResponse, EdgeTrafficSample,
-    TelemetrySnapshot,
+    CommandResultPayload, ControlPlaneCommand, EdgeCommandResult, EdgePollRequest,
+    EdgePollResponse, EdgeTrafficSample, RemoteDebugCommand, TelemetrySnapshot,
 };
 use serde::{Deserialize, Serialize};
+use tokio::{
+    sync::oneshot,
+    time::{Duration, timeout},
+};
 use tracing::warn;
 use uuid::Uuid;
 use vm::{SourceFlavor, compile_source_with_flavor, encode_program};
@@ -32,6 +36,8 @@ const MAX_UI_BLOCKS: usize = 256;
 const MAX_TRAFFIC_POINTS: usize = 720;
 const PERSISTENCE_SCHEMA_VERSION: u32 = 1;
 const TIMESERIES_BINARY_MAGIC: [u8; 4] = *b"PDTS";
+const DEFAULT_REMOTE_DEBUGGER_TCP_ADDR: &str = "127.0.0.1:9002";
+const DEBUG_RESUME_GRACE_MS: u64 = 1_500;
 
 mod embedded_webui {
     include!(concat!(env!("OUT_DIR"), "/embedded_webui.rs"));
@@ -60,6 +66,11 @@ pub struct ControllerState {
     metrics: Arc<ControllerMetrics>,
     command_sequence: Arc<AtomicU64>,
     program_sequence: Arc<AtomicU64>,
+    debug_sessions: Arc<tokio::sync::RwLock<HashMap<String, DebugSessionRecord>>>,
+    debug_start_lookup: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
+    debug_command_waiters: Arc<
+        tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<DebugCommandResponse, String>>>>,
+    >,
     persist_lock: Arc<tokio::sync::Mutex<()>>,
     config: ControllerConfig,
 }
@@ -85,6 +96,119 @@ struct EdgeRecord {
     last_telemetry: Option<TelemetrySnapshot>,
     total_polls: u64,
     total_results: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DebugSessionPhase {
+    Queued,
+    WaitingForStartResult,
+    WaitingForAttach,
+    Attached,
+    Stopped,
+    Failed,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebugSessionSummary {
+    pub session_id: String,
+    pub edge_id: String,
+    pub edge_name: String,
+    pub phase: DebugSessionPhase,
+    pub header_name: Option<String>,
+    pub nonce_header_value: Option<String>,
+    pub current_line: Option<u32>,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DebugSessionDetail {
+    pub session_id: String,
+    pub edge_id: String,
+    pub edge_name: String,
+    pub phase: DebugSessionPhase,
+    pub header_name: Option<String>,
+    pub nonce_header_value: Option<String>,
+    pub tcp_addr: String,
+    pub start_command_id: String,
+    pub stop_command_id: Option<String>,
+    pub current_line: Option<u32>,
+    pub source_flavor: Option<String>,
+    pub source_code: Option<String>,
+    pub breakpoints: Vec<u32>,
+    pub created_unix_ms: u64,
+    pub updated_unix_ms: u64,
+    pub attached_unix_ms: Option<u64>,
+    pub message: Option<String>,
+    pub last_output: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct DebugSessionRecord {
+    session_id: String,
+    edge_id: String,
+    edge_name: String,
+    phase: DebugSessionPhase,
+    requested_header_name: Option<String>,
+    header_name: Option<String>,
+    nonce_header_value: Option<String>,
+    tcp_addr: String,
+    start_command_id: String,
+    stop_command_id: Option<String>,
+    current_line: Option<u32>,
+    source_flavor: Option<String>,
+    source_code: Option<String>,
+    breakpoints: HashSet<u32>,
+    created_unix_ms: u64,
+    updated_unix_ms: u64,
+    attached_unix_ms: Option<u64>,
+    last_resume_command_unix_ms: Option<u64>,
+    message: Option<String>,
+    last_output: Option<String>,
+}
+
+impl DebugSessionRecord {
+    fn to_summary(&self) -> DebugSessionSummary {
+        DebugSessionSummary {
+            session_id: self.session_id.clone(),
+            edge_id: self.edge_id.clone(),
+            edge_name: self.edge_name.clone(),
+            phase: self.phase.clone(),
+            header_name: self.header_name.clone(),
+            nonce_header_value: self.nonce_header_value.clone(),
+            current_line: self.current_line,
+            created_unix_ms: self.created_unix_ms,
+            updated_unix_ms: self.updated_unix_ms,
+            message: self.message.clone(),
+        }
+    }
+
+    fn to_detail(&self) -> DebugSessionDetail {
+        let mut breakpoints = self.breakpoints.iter().copied().collect::<Vec<_>>();
+        breakpoints.sort_unstable();
+        DebugSessionDetail {
+            session_id: self.session_id.clone(),
+            edge_id: self.edge_id.clone(),
+            edge_name: self.edge_name.clone(),
+            phase: self.phase.clone(),
+            header_name: self.header_name.clone(),
+            nonce_header_value: self.nonce_header_value.clone(),
+            tcp_addr: self.tcp_addr.clone(),
+            start_command_id: self.start_command_id.clone(),
+            stop_command_id: self.stop_command_id.clone(),
+            current_line: self.current_line,
+            source_flavor: self.source_flavor.clone(),
+            source_code: self.source_code.clone(),
+            breakpoints,
+            created_unix_ms: self.created_unix_ms,
+            updated_unix_ms: self.updated_unix_ms,
+            attached_unix_ms: self.attached_unix_ms,
+            message: self.message.clone(),
+            last_output: self.last_output.clone(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -231,6 +355,9 @@ impl ControllerState {
             metrics: Arc::new(ControllerMetrics::default()),
             command_sequence: Arc::new(AtomicU64::new(command_sequence)),
             program_sequence: Arc::new(AtomicU64::new(program_sequence)),
+            debug_sessions: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            debug_start_lookup: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            debug_command_waiters: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             persist_lock: Arc::new(tokio::sync::Mutex::new(())),
             config,
         }
@@ -473,6 +600,10 @@ impl EdgeRecord {
 
 fn snapshot_schema_version() -> u32 {
     PERSISTENCE_SCHEMA_VERSION
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn load_snapshot_from_disk(
@@ -918,6 +1049,45 @@ struct EdgeResultsResponse {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+struct DebugSessionListResponse {
+    sessions: Vec<DebugSessionSummary>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+struct CreateDebugSessionRequest {
+    edge_id: String,
+    #[serde(default)]
+    tcp_addr: Option<String>,
+    #[serde(default)]
+    header_name: Option<String>,
+    #[serde(default)]
+    stop_on_entry: Option<bool>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct DebugCommandResponse {
+    phase: DebugSessionPhase,
+    output: String,
+    current_line: Option<u32>,
+    attached: bool,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DebugCommandRequest {
+    Where,
+    Step,
+    Next,
+    Continue,
+    Out,
+    BreakLine { line: u32 },
+    ClearLine { line: u32 },
+    PrintVar { name: String },
+    Locals,
+    Stack,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct ProgramSummary {
     program_id: String,
     name: String,
@@ -932,6 +1102,7 @@ struct ProgramVersionSummary {
     version: u32,
     created_unix_ms: u64,
     flavor: String,
+    flow_synced: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -939,6 +1110,7 @@ struct ProgramVersionDetail {
     version: u32,
     created_unix_ms: u64,
     flavor: String,
+    flow_synced: bool,
     nodes: Vec<UiGraphNode>,
     edges: Vec<UiGraphEdge>,
     source: UiSourceBundle,
@@ -985,7 +1157,8 @@ struct EnqueueApplyProgramRequest {
 #[derive(Clone, Debug, Deserialize)]
 struct EnqueueStartDebugRequest {
     command_id: Option<String>,
-    tcp_addr: String,
+    #[serde(default)]
+    tcp_addr: Option<String>,
     header_name: Option<String>,
     stop_on_entry: Option<bool>,
 }
@@ -1026,6 +1199,10 @@ struct CreateProgramVersionRequest {
     edges: Vec<UiGraphEdge>,
     #[serde(default)]
     blocks: Vec<UiBlockInstance>,
+    #[serde(default)]
+    source: Option<UiSourceBundle>,
+    #[serde(default = "default_true")]
+    flow_synced: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1157,6 +1334,8 @@ struct StoredProgramVersion {
     version: u32,
     created_unix_ms: u64,
     flavor: String,
+    #[serde(default = "default_true")]
+    flow_synced: bool,
     nodes: Vec<UiGraphNode>,
     edges: Vec<UiGraphEdge>,
     source: UiSourceBundle,
@@ -1189,7 +1368,9 @@ pub fn build_controller_app(state: ControllerState) -> Router {
         )
         .route(
             "/v1/programs/{program_id}",
-            get(get_program_handler).patch(rename_program_handler),
+            get(get_program_handler)
+                .patch(rename_program_handler)
+                .delete(delete_program_handler),
         )
         .route(
             "/v1/programs/{program_id}/versions",
@@ -1237,6 +1418,18 @@ pub fn build_controller_app(state: ControllerState) -> Router {
         .route(
             "/v1/edges/{edge_id}/commands/ping",
             post(enqueue_ping_handler),
+        )
+        .route(
+            "/v1/debug-sessions",
+            get(list_debug_sessions_handler).post(create_debug_session_handler),
+        )
+        .route(
+            "/v1/debug-sessions/{session_id}",
+            get(get_debug_session_handler).delete(stop_debug_session_handler),
+        )
+        .route(
+            "/v1/debug-sessions/{session_id}/command",
+            post(run_debug_command_handler),
         )
         .with_state(state)
 }
@@ -1458,34 +1651,79 @@ async fn rename_program_handler(
     Ok(Json(detail))
 }
 
+async fn delete_program_handler(
+    State(state): State<ControllerState>,
+    Path(program_id): Path<String>,
+) -> Result<Json<StatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    {
+        let mut guard = state.inner.write().await;
+        if guard.programs.remove(&program_id).is_none() {
+            return Err(not_found("program not found"));
+        }
+        for record in guard.edges.values_mut() {
+            if record
+                .applied_program
+                .as_ref()
+                .map(|applied| applied.program_id == program_id)
+                .unwrap_or(false)
+            {
+                record.applied_program = None;
+            }
+            record
+                .pending_apply_programs
+                .retain(|_, applied| applied.program_id != program_id);
+        }
+    }
+    state.persist_snapshot().await.map_err(internal_error)?;
+    Ok(Json(StatusResponse { status: "deleted" }))
+}
+
 async fn create_program_version_handler(
     State(state): State<ControllerState>,
     Path(program_id): Path<String>,
     Json(request): Json<CreateProgramVersionRequest>,
 ) -> Result<(StatusCode, Json<ProgramVersionResponse>), (StatusCode, Json<ErrorResponse>)> {
-    let nodes = if !request.nodes.is_empty() {
-        request.nodes.clone()
+    // Backward/compat guard: if client sends source-only payload with no graph,
+    // accept it as code-only save even when flow_synced is absent/stale.
+    let inferred_code_only =
+        request.source.is_some() && request.nodes.is_empty() && request.blocks.is_empty();
+    let flow_synced = if inferred_code_only {
+        false
     } else {
-        request
-            .blocks
-            .iter()
-            .enumerate()
-            .map(|(index, block)| UiGraphNode {
-                id: format!("b{}", index + 1),
-                block_id: block.block_id.clone(),
-                values: block.values.clone(),
-                position: None,
-            })
-            .collect::<Vec<_>>()
+        request.flow_synced
     };
-    let edges = request.edges.clone();
-    if nodes.is_empty() {
-        return Err(bad_request(
-            "program version must include at least one node",
-        ));
-    }
-
-    let source = render_ui_sources(&request.blocks, &nodes, &edges)?;
+    let (nodes, edges, source) = if flow_synced {
+        let nodes = if !request.nodes.is_empty() {
+            request.nodes.clone()
+        } else {
+            request
+                .blocks
+                .iter()
+                .enumerate()
+                .map(|(index, block)| UiGraphNode {
+                    id: format!("b{}", index + 1),
+                    block_id: block.block_id.clone(),
+                    values: block.values.clone(),
+                    position: None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let edges = request.edges.clone();
+        if nodes.is_empty() {
+            return Err(bad_request(
+                "program version must include at least one node",
+            ));
+        }
+        let source = render_ui_sources(&request.blocks, &nodes, &edges)?;
+        (nodes, edges, source)
+    } else {
+        let Some(source) = request.source.clone() else {
+            return Err(bad_request(
+                "source is required when flow_synced is false",
+            ));
+        };
+        (Vec::new(), Vec::new(), source)
+    };
     let (_, flavor_label) = parse_ui_flavor(request.flavor.as_deref())?;
     let detail = {
         let mut guard = state.inner.write().await;
@@ -1498,6 +1736,7 @@ async fn create_program_version_handler(
             version,
             created_unix_ms,
             flavor: flavor_label.to_string(),
+            flow_synced,
             nodes: nodes.clone(),
             edges: edges.clone(),
             source: source.clone(),
@@ -1545,10 +1784,13 @@ async fn rpc_poll_handler(
         .poll_requests_total
         .fetch_add(1, Ordering::Relaxed);
 
-    let command = {
+    let debug_session_active = request.telemetry.debug_session_active;
+    let debug_session_attached = request.telemetry.debug_session_attached;
+    let debug_session_current_line = request.telemetry.debug_session_current_line;
+    let (resolved_edge_id, command) = {
         let mut guard = state.inner.write().await;
         let edge_id = guard.resolve_or_create_edge_id(&request.edge_id);
-        let record = guard.edges.entry(edge_id).or_default();
+        let record = guard.edges.entry(edge_id.clone()).or_default();
         let reported_name = request
             .edge_name
             .as_deref()
@@ -1566,8 +1808,57 @@ async fn rpc_poll_handler(
             append_traffic_sample(record, sample, now);
         }
         record.total_polls += 1;
-        record.pending_commands.pop_front()
+        let command = record.pending_commands.pop_front();
+        (edge_id, command)
     };
+
+    {
+        let mut sessions = state.debug_sessions.write().await;
+        for session in sessions.values_mut().filter(|item| {
+            item.edge_id == resolved_edge_id || item.edge_id == request.edge_id
+        }) {
+            if matches!(
+                session.phase,
+                DebugSessionPhase::Stopped | DebugSessionPhase::Failed
+            ) {
+                continue;
+            }
+            if session.edge_id != resolved_edge_id {
+                session.edge_id = resolved_edge_id.clone();
+            }
+            if !debug_session_active {
+                session.phase = DebugSessionPhase::Stopped;
+                session.current_line = None;
+                session.last_resume_command_unix_ms = None;
+                session.updated_unix_ms = now_unix_ms();
+                session.message = Some("debug session is no longer active on edge".to_string());
+                continue;
+            }
+            if debug_session_attached {
+                session.phase = DebugSessionPhase::Attached;
+                session.last_resume_command_unix_ms = None;
+                if session.attached_unix_ms.is_none() {
+                    session.attached_unix_ms = Some(now_unix_ms());
+                }
+                if let Some(line) = debug_session_current_line {
+                    session.current_line = Some(line);
+                }
+                session.updated_unix_ms = now_unix_ms();
+                session.message = Some("debugger attached".to_string());
+            } else if session.phase != DebugSessionPhase::WaitingForStartResult {
+                let now = now_unix_ms();
+                if let Some(last_resume) = session.last_resume_command_unix_ms
+                    && now.saturating_sub(last_resume) <= DEBUG_RESUME_GRACE_MS
+                {
+                    session.updated_unix_ms = now;
+                    continue;
+                }
+                session.phase = DebugSessionPhase::WaitingForAttach;
+                session.current_line = None;
+                session.updated_unix_ms = now;
+            }
+        }
+    }
 
     if command.is_some() {
         state
@@ -1580,9 +1871,14 @@ async fn rpc_poll_handler(
         warn!("failed to persist controller state after poll update: {err}");
     }
 
+    let poll_interval_ms = if debug_session_active {
+        200
+    } else {
+        state.config.default_poll_interval_ms
+    };
     Json(EdgePollResponse {
         command,
-        poll_interval_ms: state.config.default_poll_interval_ms,
+        poll_interval_ms,
     })
 }
 
@@ -1597,9 +1893,12 @@ async fn rpc_result_handler(
 
     let is_ok = result.ok;
     let command_id = result.command_id.clone();
-    {
+    let result_payload = result.result.clone();
+    let edge_name_for_debug = result.edge_name.clone();
+    let resolved_edge_id_for_debug = {
         let mut guard = state.inner.write().await;
         let edge_id = guard.resolve_or_create_edge_id(&result.edge_id);
+        let resolved_for_debug = edge_id.clone();
         let record = guard.edges.entry(edge_id).or_default();
         let reported_name = result
             .edge_name
@@ -1623,7 +1922,18 @@ async fn rpc_result_handler(
         {
             record.applied_program = Some(program_ref);
         }
-    }
+        resolved_for_debug
+    };
+
+    process_debug_session_result(
+        state.clone(),
+        &command_id,
+        &resolved_edge_id_for_debug,
+        edge_name_for_debug,
+        is_ok,
+        &result_payload,
+    )
+    .await;
 
     if let Err(err) = state.persist_snapshot().await {
         warn!("failed to persist controller state after command result: {err}");
@@ -1709,6 +2019,243 @@ async fn get_edge_results_handler(
             .collect::<Vec<_>>();
         EdgeResultsResponse { results }
     };
+    Ok(Json(response))
+}
+
+async fn list_debug_sessions_handler(
+    State(state): State<ControllerState>,
+) -> Json<DebugSessionListResponse> {
+    let mut sessions = {
+        let guard = state.debug_sessions.read().await;
+        guard
+            .values()
+            .map(DebugSessionRecord::to_summary)
+            .collect::<Vec<_>>()
+    };
+    sessions.sort_by(|lhs, rhs| rhs.updated_unix_ms.cmp(&lhs.updated_unix_ms));
+    Json(DebugSessionListResponse { sessions })
+}
+
+async fn get_debug_session_handler(
+    State(state): State<ControllerState>,
+    Path(session_id): Path<String>,
+) -> Result<Json<DebugSessionDetail>, (StatusCode, Json<ErrorResponse>)> {
+    let detail = {
+        let guard = state.debug_sessions.read().await;
+        let Some(session) = guard.get(&session_id) else {
+            return Err(not_found("debug session not found"));
+        };
+        session.to_detail()
+    };
+    Ok(Json(detail))
+}
+
+async fn create_debug_session_handler(
+    State(state): State<ControllerState>,
+    Json(request): Json<CreateDebugSessionRequest>,
+) -> Result<(StatusCode, Json<DebugSessionDetail>), (StatusCode, Json<ErrorResponse>)> {
+    let tcp_addr = request
+        .tcp_addr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_REMOTE_DEBUGGER_TCP_ADDR)
+        .to_string();
+
+    let (resolved_edge_id, edge_name, source_flavor, source_code) = {
+        let guard = state.inner.read().await;
+        let Some(resolved_edge_id) = guard.resolve_edge_id(&request.edge_id) else {
+            return Err(not_found("edge not found"));
+        };
+        let Some(record) = guard.edges.get(&resolved_edge_id) else {
+            return Err(not_found("edge not found"));
+        };
+        if !record
+            .last_telemetry
+            .as_ref()
+            .map(|telemetry| telemetry.program_loaded)
+            .unwrap_or(false)
+        {
+            return Err(bad_request(
+                "edge has no loaded program yet; apply a program before starting a debug session",
+            ));
+        }
+        let edge_name = if record.edge_name.trim().is_empty() {
+            resolved_edge_id.clone()
+        } else {
+            record.edge_name.clone()
+        };
+        let (source_flavor, source_code) = resolve_edge_debug_source(&guard, &resolved_edge_id);
+        (resolved_edge_id, edge_name, source_flavor, source_code)
+    };
+
+    let now = now_unix_ms();
+    let command_id = state.next_command_id();
+    let session_id = Uuid::new_v4().to_string();
+    let stop_on_entry = request.stop_on_entry.unwrap_or(true);
+    let command = ControlPlaneCommand::StartDebugSession {
+        command_id: command_id.clone(),
+        tcp_addr: tcp_addr.clone(),
+        header_name: request.header_name.clone(),
+        stop_on_entry: Some(stop_on_entry),
+    };
+    let _queued = state
+        .enqueue_command(resolved_edge_id.clone(), command)
+        .await;
+
+    let record = DebugSessionRecord {
+        session_id: session_id.clone(),
+        edge_id: resolved_edge_id,
+        edge_name,
+        phase: DebugSessionPhase::WaitingForStartResult,
+        requested_header_name: request.header_name,
+        header_name: None,
+        nonce_header_value: None,
+        tcp_addr,
+        start_command_id: command_id.clone(),
+        stop_command_id: None,
+        current_line: None,
+        source_flavor,
+        source_code,
+        breakpoints: HashSet::new(),
+        created_unix_ms: now,
+        updated_unix_ms: now,
+        attached_unix_ms: None,
+        last_resume_command_unix_ms: None,
+        message: Some("start-debug command queued".to_string()),
+        last_output: None,
+    };
+
+    {
+        let mut sessions = state.debug_sessions.write().await;
+        sessions.insert(session_id.clone(), record.clone());
+    }
+    {
+        let mut lookup = state.debug_start_lookup.write().await;
+        lookup.insert(command_id, session_id);
+    }
+
+    Ok((StatusCode::ACCEPTED, Json(record.to_detail())))
+}
+
+async fn stop_debug_session_handler(
+    State(state): State<ControllerState>,
+    Path(session_id): Path<String>,
+) -> Result<(StatusCode, Json<DebugSessionDetail>), (StatusCode, Json<ErrorResponse>)> {
+    let edge_id = {
+        let guard = state.debug_sessions.read().await;
+        let Some(session) = guard.get(&session_id) else {
+            return Err(not_found("debug session not found"));
+        };
+        session.edge_id.clone()
+    };
+
+    let command_id = state.next_command_id();
+    let command = ControlPlaneCommand::StopDebugSession {
+        command_id: command_id.clone(),
+    };
+    let _queued = state.enqueue_command(edge_id, command).await;
+
+    let detail = {
+        let mut sessions = state.debug_sessions.write().await;
+        let Some(session) = sessions.get_mut(&session_id) else {
+            return Err(not_found("debug session not found"));
+        };
+        session.phase = DebugSessionPhase::Stopped;
+        session.updated_unix_ms = now_unix_ms();
+        session.stop_command_id = Some(command_id);
+        session.message = Some("stop-debug command queued".to_string());
+        session.to_detail()
+    };
+
+    Ok((StatusCode::ACCEPTED, Json(detail)))
+}
+
+async fn run_debug_command_handler(
+    State(state): State<ControllerState>,
+    Path(session_id): Path<String>,
+    Json(request): Json<DebugCommandRequest>,
+) -> Result<Json<DebugCommandResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let request_for_state = request.clone();
+    let (edge_id, phase) = {
+        let guard = state.debug_sessions.read().await;
+        let Some(session) = guard.get(&session_id) else {
+            return Err(not_found("debug session not found"));
+        };
+        (session.edge_id.clone(), session.phase.clone())
+    };
+    if phase != DebugSessionPhase::Attached {
+        return Err(bad_request(
+            "debug session is not attached yet; wait for a matching request",
+        ));
+    }
+
+    let rpc_command = match request {
+        DebugCommandRequest::Where => RemoteDebugCommand::Where,
+        DebugCommandRequest::Step => RemoteDebugCommand::Step,
+        DebugCommandRequest::Next => RemoteDebugCommand::Next,
+        DebugCommandRequest::Continue => RemoteDebugCommand::Continue,
+        DebugCommandRequest::Out => RemoteDebugCommand::Out,
+        DebugCommandRequest::BreakLine { line } => RemoteDebugCommand::BreakLine { line },
+        DebugCommandRequest::ClearLine { line } => RemoteDebugCommand::ClearLine { line },
+        DebugCommandRequest::PrintVar { name } => {
+            if name.trim().is_empty() {
+                return Err(bad_request("variable name cannot be empty"));
+            }
+            RemoteDebugCommand::PrintVar {
+                name: name.trim().to_string(),
+            }
+        }
+        DebugCommandRequest::Locals => RemoteDebugCommand::Locals,
+        DebugCommandRequest::Stack => RemoteDebugCommand::Stack,
+    };
+
+    let command_id = state.next_command_id();
+    let (response_tx, response_rx) = oneshot::channel();
+    {
+        let mut waiters = state.debug_command_waiters.lock().await;
+        waiters.insert(command_id.clone(), response_tx);
+    }
+
+    let command = ControlPlaneCommand::DebugCommand {
+        command_id: command_id.clone(),
+        session_id: session_id.clone(),
+        command: rpc_command,
+    };
+    let _queued = state.enqueue_command(edge_id, command).await;
+
+    let response = match timeout(Duration::from_secs(20), response_rx).await {
+        Ok(Ok(Ok(response))) => response,
+        Ok(Ok(Err(message))) => {
+            return Err(bad_request(&message));
+        }
+        Ok(Err(_)) => {
+            return Err(bad_request("debug command response channel closed"));
+        }
+        Err(_) => {
+            let mut waiters = state.debug_command_waiters.lock().await;
+            waiters.remove(&command_id);
+            return Err(bad_request(
+                "debug command timed out waiting for edge result",
+            ));
+        }
+    };
+
+    {
+        let mut sessions = state.debug_sessions.write().await;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            match request_for_state {
+                DebugCommandRequest::BreakLine { line } => {
+                    session.breakpoints.insert(line);
+                }
+                DebugCommandRequest::ClearLine { line } => {
+                    session.breakpoints.remove(&line);
+                }
+                _ => {}
+            }
+        }
+    }
+
     Ok(Json(response))
 }
 
@@ -1827,14 +2374,18 @@ async fn enqueue_start_debug_handler(
     Path(edge_id): Path<String>,
     Json(request): Json<EnqueueStartDebugRequest>,
 ) -> Result<(StatusCode, Json<EnqueueCommandResponse>), (StatusCode, Json<ErrorResponse>)> {
-    if request.tcp_addr.trim().is_empty() {
-        return Err(bad_request("tcp_addr cannot be empty"));
-    }
+    let tcp_addr = request
+        .tcp_addr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_REMOTE_DEBUGGER_TCP_ADDR)
+        .to_string();
     let command = ControlPlaneCommand::StartDebugSession {
         command_id: request
             .command_id
             .unwrap_or_else(|| state.next_command_id()),
-        tcp_addr: request.tcp_addr,
+        tcp_addr,
         header_name: request.header_name,
         stop_on_entry: request.stop_on_entry,
     };
@@ -1911,6 +2462,202 @@ async fn enqueue_ping_handler(
     };
     let queued = state.enqueue_command(edge_id, command).await;
     (StatusCode::ACCEPTED, Json(queued))
+}
+
+async fn process_debug_session_result(
+    state: ControllerState,
+    command_id: &str,
+    edge_id: &str,
+    edge_name: Option<String>,
+    is_ok: bool,
+    payload: &CommandResultPayload,
+) {
+    match payload {
+        CommandResultPayload::StartDebugSession {
+            status,
+            nonce_header_name,
+            nonce_header_value,
+            message,
+        } => {
+            let session_id = {
+                let mut lookup = state.debug_start_lookup.write().await;
+                lookup.remove(command_id)
+            };
+            let Some(session_id) = session_id else {
+                return;
+            };
+
+            {
+                let mut sessions = state.debug_sessions.write().await;
+                let Some(session) = sessions.get_mut(&session_id) else {
+                    return;
+                };
+                session.edge_id = edge_id.to_string();
+                if let Some(name) = edge_name
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                {
+                    session.edge_name = name.to_string();
+                }
+                session.updated_unix_ms = now_unix_ms();
+                if is_ok && status.is_some() {
+                    let reported_status = status.as_ref();
+                    session.phase = if reported_status.map(|item| item.attached).unwrap_or(false) {
+                        DebugSessionPhase::Attached
+                    } else {
+                        DebugSessionPhase::WaitingForAttach
+                    };
+                    session.header_name = nonce_header_name
+                        .clone()
+                        .or_else(|| reported_status.and_then(|item| item.header_name.clone()))
+                        .or_else(|| session.requested_header_name.clone());
+                    session.nonce_header_value = nonce_header_value
+                        .clone()
+                        .or_else(|| reported_status.and_then(|item| item.header_value.clone()));
+                    if let Some(addr) = reported_status
+                        .and_then(|item| item.tcp_addr.clone())
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        session.tcp_addr = addr;
+                    }
+                    session.current_line = reported_status.and_then(|item| item.current_line);
+                    session.message = Some(
+                        "debug session active on edge; waiting for a matching request to attach"
+                            .to_string(),
+                    );
+                } else {
+                    session.phase = DebugSessionPhase::Failed;
+                    session.message =
+                        Some(message.clone().unwrap_or_else(|| {
+                            "failed to start debug session on edge".to_string()
+                        }));
+                }
+            }
+        }
+        CommandResultPayload::DebugCommand {
+            session_id,
+            response,
+            message,
+        } => {
+            let target_session_id = if let Some(session_id) = session_id.clone() {
+                Some(session_id)
+            } else {
+                let sessions = state.debug_sessions.read().await;
+                sessions
+                    .values()
+                    .find(|item| item.edge_id == edge_id)
+                    .map(|item| item.session_id.clone())
+            };
+            let mut response_for_waiter: Result<DebugCommandResponse, String> = Err(message
+                .clone()
+                .unwrap_or_else(|| "debug command failed".to_string()));
+
+            if let Some(target_session_id) = target_session_id {
+                let mut sessions = state.debug_sessions.write().await;
+                if let Some(session) = sessions.get_mut(&target_session_id) {
+                    session.updated_unix_ms = now_unix_ms();
+                    if let Some(name) = edge_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                    {
+                        session.edge_name = name.to_string();
+                    }
+                    if is_ok {
+                        if let Some(remote) = response {
+                            if remote.attached {
+                                session.phase = DebugSessionPhase::Attached;
+                                session.last_resume_command_unix_ms = None;
+                                if let Some(line) = remote.current_line {
+                                    session.current_line = Some(line);
+                                }
+                                session.message = Some("debugger attached".to_string());
+                            } else {
+                                session.last_resume_command_unix_ms = Some(now_unix_ms());
+                                if session.phase != DebugSessionPhase::Attached {
+                                    session.phase = DebugSessionPhase::WaitingForAttach;
+                                }
+                                // Keep current line until we positively observe detached/not-attached.
+                                session.message =
+                                    Some("resume command sent; waiting for next stop".to_string());
+                            }
+                            session.last_output = Some(remote.output.clone());
+                            response_for_waiter = Ok(DebugCommandResponse {
+                                phase: session.phase.clone(),
+                                output: remote.output.clone(),
+                                current_line: session.current_line,
+                                attached: remote.attached,
+                            });
+                        }
+                    } else {
+                        let error_message = message
+                            .clone()
+                            .unwrap_or_else(|| "debug command failed".to_string());
+                        if error_message.contains("not attached") {
+                            session.phase = DebugSessionPhase::WaitingForAttach;
+                            session.last_resume_command_unix_ms = None;
+                        } else {
+                            session.phase = DebugSessionPhase::Failed;
+                            session.last_resume_command_unix_ms = None;
+                        }
+                        session.message = Some(error_message.clone());
+                        response_for_waiter = Err(error_message);
+                    }
+                }
+            }
+
+            let waiter = {
+                let mut waiters = state.debug_command_waiters.lock().await;
+                waiters.remove(command_id)
+            };
+            if let Some(waiter) = waiter {
+                let _ = waiter.send(response_for_waiter);
+            }
+        }
+        CommandResultPayload::StopDebugSession { .. } => {
+            let mut sessions = state.debug_sessions.write().await;
+            if let Some(session) = sessions
+                .values_mut()
+                .find(|session| session.stop_command_id.as_deref() == Some(command_id))
+            {
+                session.phase = DebugSessionPhase::Stopped;
+                session.updated_unix_ms = now_unix_ms();
+                session.message = Some("debug session stopped".to_string());
+            }
+        }
+        _ => {}
+    }
+}
+
+fn resolve_edge_debug_source(
+    store: &ControllerStore,
+    edge_id: &str,
+) -> (Option<String>, Option<String>) {
+    let Some(edge_record) = store.edges.get(edge_id) else {
+        return (None, None);
+    };
+    let Some(applied) = edge_record.applied_program.as_ref() else {
+        return (None, None);
+    };
+    let Some(program) = store.programs.get(&applied.program_id) else {
+        return (None, None);
+    };
+    let Some(version) = program
+        .versions
+        .iter()
+        .find(|item| item.version == applied.version)
+    else {
+        return (None, None);
+    };
+    let flavor = version.flavor.clone();
+    let parsed_flavor = parse_ui_flavor(Some(flavor.as_str()))
+        .map(|(item, _)| item)
+        .unwrap_or(SourceFlavor::RustScript);
+    (
+        Some(flavor),
+        Some(source_for_flavor(&version.source, parsed_flavor)),
+    )
 }
 
 fn map_summary(edge_id: &str, record: &EdgeRecord) -> EdgeSummary {
@@ -2021,6 +2768,7 @@ fn map_program_detail(program: &StoredProgram) -> ProgramDetailResponse {
                 version: item.version,
                 created_unix_ms: item.created_unix_ms,
                 flavor: item.flavor.clone(),
+                flow_synced: item.flow_synced,
             })
             .collect(),
     }
@@ -2031,6 +2779,7 @@ fn map_program_version_detail(version: &StoredProgramVersion) -> ProgramVersionD
         version: version.version,
         created_unix_ms: version.created_unix_ms,
         flavor: version.flavor.clone(),
+        flow_synced: version.flow_synced,
         nodes: version.nodes.clone(),
         edges: version.edges.clone(),
         source: version.source.clone(),
@@ -2041,6 +2790,7 @@ fn command_kind(command: &ControlPlaneCommand) -> &'static str {
     match command {
         ControlPlaneCommand::ApplyProgram { .. } => "apply_program",
         ControlPlaneCommand::StartDebugSession { .. } => "start_debug_session",
+        ControlPlaneCommand::DebugCommand { .. } => "debug_command",
         ControlPlaneCommand::StopDebugSession { .. } => "stop_debug_session",
         ControlPlaneCommand::GetHealth { .. } => "get_health",
         ControlPlaneCommand::GetMetrics { .. } => "get_metrics",
@@ -2180,7 +2930,7 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
                 key: "value",
                 label: "Body",
                 input_type: UiInputType::Text,
-                default_value: "request allowed",
+                default_value: "okkk",
                 placeholder: "request allowed or $var",
                 connectable: true,
             }],

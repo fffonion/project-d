@@ -40,6 +40,8 @@ fn empty_telemetry() -> TelemetrySnapshot {
         uptime_seconds: 0,
         program_loaded: false,
         debug_session_active: false,
+        debug_session_attached: false,
+        debug_session_current_line: None,
         data_requests_total: 0,
         vm_execution_errors_total: 0,
         program_apply_success_total: 0,
