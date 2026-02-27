@@ -15,7 +15,10 @@ pub use compiler::{
     compile_source_with_flavor,
 };
 pub use debug::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
-pub use debugger::{Debugger, StepMode};
+pub use debugger::{
+    DebugCommandBridge, DebugCommandBridgeError, DebugCommandBridgeResponse,
+    DebugCommandBridgeStatus, Debugger, StepMode,
+};
 pub use jit::{
     JitAttempt, JitConfig, JitNyiDoc, JitNyiReason, JitSnapshot, JitTrace, JitTraceTerminal,
     TraceJitEngine,

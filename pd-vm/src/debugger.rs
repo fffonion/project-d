@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::debug::DebugInfo;
 use crate::vm::Vm;
@@ -18,7 +20,53 @@ pub struct Debugger {
     line_breakpoints: HashSet<u32>,
     step_mode: StepMode,
     server: Option<DebugServer>,
+    bridge: Option<DebugCommandBridge>,
     client_detached: bool,
+}
+
+#[derive(Clone)]
+pub struct DebugCommandBridge {
+    inner: Arc<DebugCommandBridgeInner>,
+}
+
+struct DebugCommandBridgeInner {
+    state: Mutex<DebugCommandBridgeState>,
+    changed: Condvar,
+}
+
+struct DebugCommandBridgeState {
+    attached: bool,
+    current_line: Option<u32>,
+    closed: bool,
+    next_request_id: u64,
+    pending_request: Option<DebugCommandBridgeRequest>,
+    pending_response: Option<DebugCommandBridgeResponseInternal>,
+}
+
+struct DebugCommandBridgeRequest {
+    request_id: u64,
+    command: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct DebugCommandBridgeResponse {
+    pub output: String,
+    pub current_line: Option<u32>,
+    pub attached: bool,
+    pub resumed: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DebugCommandBridgeStatus {
+    pub attached: bool,
+    pub current_line: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DebugCommandBridgeError {
+    NotAttached,
+    Timeout,
+    Closed,
 }
 
 impl Default for Debugger {
@@ -34,6 +82,7 @@ impl Debugger {
             line_breakpoints: HashSet::new(),
             step_mode: StepMode::Running,
             server: None,
+            bridge: None,
             client_detached: false,
         }
     }
@@ -46,8 +95,20 @@ impl Debugger {
             line_breakpoints: HashSet::new(),
             step_mode: StepMode::Running,
             server: Some(DebugServer::new(listener)),
+            bridge: None,
             client_detached: false,
         })
+    }
+
+    pub fn with_command_bridge(bridge: DebugCommandBridge) -> Self {
+        Self {
+            breakpoints: HashSet::new(),
+            line_breakpoints: HashSet::new(),
+            step_mode: StepMode::Running,
+            server: None,
+            bridge: Some(bridge),
+            client_detached: false,
+        }
     }
 
     pub fn stop_on_entry(&mut self) {
@@ -113,6 +174,14 @@ impl Debugger {
                 &mut self.step_mode,
             );
         }
+        if let Some(bridge) = self.bridge.as_ref() {
+            return bridge.repl(
+                vm,
+                &mut self.breakpoints,
+                &mut self.line_breakpoints,
+                &mut self.step_mode,
+            );
+        }
         repl_stdio(
             vm,
             &mut self.breakpoints,
@@ -121,6 +190,220 @@ impl Debugger {
         );
         false
     }
+}
+
+impl DebugCommandBridge {
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(DebugCommandBridgeInner {
+                state: Mutex::new(DebugCommandBridgeState {
+                    attached: false,
+                    current_line: None,
+                    closed: false,
+                    next_request_id: 0,
+                    pending_request: None,
+                    pending_response: None,
+                }),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    pub fn status(&self) -> DebugCommandBridgeStatus {
+        let state = self
+            .inner
+            .state
+            .lock()
+            .expect("debug command bridge lock poisoned");
+        DebugCommandBridgeStatus {
+            attached: state.attached,
+            current_line: state.current_line,
+        }
+    }
+
+    pub fn close(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("debug command bridge lock poisoned");
+        state.closed = true;
+        state.attached = false;
+        state.current_line = None;
+        state.pending_request = None;
+        state.pending_response = None;
+        self.inner.changed.notify_all();
+    }
+
+    pub fn execute(
+        &self,
+        command: impl Into<String>,
+        timeout: Duration,
+    ) -> Result<DebugCommandBridgeResponse, DebugCommandBridgeError> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .expect("debug command bridge lock poisoned");
+        if state.closed {
+            return Err(DebugCommandBridgeError::Closed);
+        }
+        if !state.attached {
+            return Err(DebugCommandBridgeError::NotAttached);
+        }
+
+        state.next_request_id = state.next_request_id.saturating_add(1);
+        let request_id = state.next_request_id;
+        state.pending_request = Some(DebugCommandBridgeRequest {
+            request_id,
+            command: command.into(),
+        });
+        self.inner.changed.notify_all();
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            if state.closed {
+                return Err(DebugCommandBridgeError::Closed);
+            }
+            if let Some(response) = state.pending_response.clone()
+                && response.request_id == request_id
+            {
+                state.pending_response = None;
+                return Ok(DebugCommandBridgeResponse {
+                    output: response.output,
+                    current_line: response.current_line,
+                    attached: response.attached,
+                    resumed: response.resumed,
+                });
+            }
+            let now = Instant::now();
+            if now >= deadline {
+                return Err(DebugCommandBridgeError::Timeout);
+            }
+            let wait_for = deadline.saturating_duration_since(now);
+            let (next_state, wait_result) = self
+                .inner
+                .changed
+                .wait_timeout(state, wait_for)
+                .expect("debug command bridge lock poisoned");
+            state = next_state;
+            if wait_result.timed_out() {
+                return Err(DebugCommandBridgeError::Timeout);
+            }
+        }
+    }
+
+    fn repl(
+        &self,
+        vm: &Vm,
+        breakpoints: &mut HashSet<usize>,
+        line_breakpoints: &mut HashSet<u32>,
+        step: &mut StepMode,
+    ) -> bool {
+        {
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("debug command bridge lock poisoned");
+            state.closed = false;
+            state.attached = true;
+            state.current_line = current_line(vm);
+            state.pending_request = None;
+            state.pending_response = None;
+            self.inner.changed.notify_all();
+        }
+
+        loop {
+            let request = {
+                let mut state = self
+                    .inner
+                    .state
+                    .lock()
+                    .expect("debug command bridge lock poisoned");
+                while !state.closed && state.pending_request.is_none() {
+                    state = self
+                        .inner
+                        .changed
+                        .wait(state)
+                        .expect("debug command bridge lock poisoned");
+                }
+                if state.closed {
+                    state.attached = false;
+                    state.current_line = None;
+                    state.pending_request = None;
+                    state.pending_response = None;
+                    self.inner.changed.notify_all();
+                    return true;
+                }
+                state
+                    .pending_request
+                    .take()
+                    .expect("debug command request missing")
+            };
+
+            let mut output = Vec::<u8>::new();
+            let action = handle_command(
+                &request.command,
+                vm,
+                breakpoints,
+                line_breakpoints,
+                step,
+                &mut output,
+            );
+            let resumed = action.is_break();
+            let current_line = if resumed { None } else { current_line(vm) };
+            let attached = !resumed;
+            let output = String::from_utf8_lossy(&output).to_string();
+
+            let mut state = self
+                .inner
+                .state
+                .lock()
+                .expect("debug command bridge lock poisoned");
+            state.attached = attached;
+            state.current_line = current_line;
+            state.pending_response = Some(DebugCommandBridgeResponseInternal {
+                request_id: request.request_id,
+                output,
+                current_line,
+                attached,
+                resumed,
+            });
+            self.inner.changed.notify_all();
+
+            if resumed {
+                return false;
+            }
+        }
+    }
+}
+
+impl Default for DebugCommandBridge {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Display for DebugCommandBridgeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DebugCommandBridgeError::NotAttached => write!(f, "debugger is not attached"),
+            DebugCommandBridgeError::Timeout => write!(f, "timed out waiting for debugger"),
+            DebugCommandBridgeError::Closed => write!(f, "debugger bridge is closed"),
+        }
+    }
+}
+
+impl std::error::Error for DebugCommandBridgeError {}
+
+#[derive(Clone)]
+struct DebugCommandBridgeResponseInternal {
+    request_id: u64,
+    output: String,
+    current_line: Option<u32>,
+    attached: bool,
+    resumed: bool,
 }
 
 struct DebugServer {

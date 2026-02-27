@@ -1,4 +1,4 @@
-import { add_one } from "pd-vm-host";
+import { add_one } from "vm";
 
 let i = 0;
 let total = 0;

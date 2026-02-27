@@ -117,8 +117,8 @@ fn javascript_module_declarations_are_ignored() {
     let source = r#"
         import {
             add_one
-        } from "pd-vm-host";
-        const { ignored } = require("pd-vm-host");
+        } from "vm";
+        const { ignored } = require("vm");
         console.log(add_one(41));
     "#;
     let compiled = compile_source_with_flavor(source, SourceFlavor::JavaScript)

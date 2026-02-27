@@ -1,5 +1,5 @@
 import * as string from "../stdlib/rss/strings.rss";
-import { add_one } from "pd-vm-host";
+import { add_one } from "vm";
 
 // Complex JavaScript flavor example: loop + stdlib + host + closure.
 let total = 0;
@@ -22,4 +22,5 @@ const profile = { stats: { score: closureValue } };
 const chainedScore = profile?.stats?.score;
 const missingScore = profile?.missing?.value;
 
-console.log(closureValue);
+console.log(chainedScore);
+console.log(missingScore);
