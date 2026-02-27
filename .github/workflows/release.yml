@@ -13,25 +13,51 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build pd-proxy and pd-vm-run
+      - name: Build WebUI assets
         run: |
-          cargo build -p pd-proxy --release --locked
+          cd pd-controller/webui
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Compute git build metadata
+        shell: bash
+        run: |
+          echo "PD_BUILD_GIT_TAG=${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+          echo "PD_BUILD_GIT_COMMIT=$(git rev-parse --short=12 HEAD)" >> "$GITHUB_ENV"
+          if [[ -n "$(git status --porcelain --untracked-files=no)" ]]; then
+            echo "PD_BUILD_GIT_DIRTY=true" >> "$GITHUB_ENV"
+          else
+            echo "PD_BUILD_GIT_DIRTY=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build pd-edge, pd-controller and pd-vm-run
+        run: |
+          cargo build -p pd-edge --release --locked
+          cargo build -p pd-controller --release --locked
           cargo build -p pd-vm --bin pd-vm-run --release --locked
 
       - name: Package binaries
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/pd-proxy dist/pd-proxy
+          cp target/release/pd-edge dist/pd-edge
+          cp target/release/pd-controller dist/pd-controller
           cp target/release/pd-vm-run dist/pd-vm-run
-          tar -czf dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-proxy
+          tar -czf dist/pd-edge-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-edge
+          tar -czf dist/pd-controller-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-controller
           tar -czf dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-vm-run
 
       - name: Upload workflow artifacts
@@ -39,7 +65,8 @@ jobs:
         with:
           name: release-binaries-${{ github.ref_name }}-linux-x86_64
           path: |
-            dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-edge-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-controller-${{ github.ref_name }}-linux-x86_64.tar.gz
             dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz
 
       - name: Publish release asset
@@ -47,5 +74,6 @@ jobs:
         with:
           generate_release_notes: true
           files: |
-            dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-edge-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-controller-${{ github.ref_name }}-linux-x86_64.tar.gz
             dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz

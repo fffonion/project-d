@@ -278,7 +278,7 @@ fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) -> Result<(), io:
             "rate_limit_allow" => {
                 vm.bind_function("rate_limit_allow", Box::new(RateLimitAllowFunction))
             }
-            "set_header" | "set_response_content" | "set_upstream" => {
+            "set_header" | "set_response_content" | "set_response_status" | "set_upstream" => {
                 vm.bind_function(decl.name.as_str(), Box::new(NoopFunction))
             }
             other => {

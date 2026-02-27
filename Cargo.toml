@@ -1,8 +1,9 @@
 [workspace]
 members = [
 	"pd-vm",
-	"pd-proxy-abi",
-	"pd-proxy",
+	"pd-edge-abi",
+	"pd-edge",
+	"pd-controller",
 ]
 resolver = "2"
 

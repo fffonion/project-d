@@ -1,3 +1,7 @@
 /target
 .vsix
 .vmbc
+.pd-controller
+.pd-edge
+node_modules
+dist
