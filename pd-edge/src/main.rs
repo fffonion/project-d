@@ -225,18 +225,15 @@ fn print_cli_help() {
 
 fn binary_version_text() -> String {
     let binary = env!("CARGO_PKG_NAME");
-    let pkg_version = env!("CARGO_PKG_VERSION");
     let git_tag = option_env!("PD_BUILD_GIT_TAG").unwrap_or("untagged");
     let git_commit = option_env!("PD_BUILD_GIT_COMMIT").unwrap_or("unknown");
     let git_dirty = option_env!("PD_BUILD_GIT_DIRTY").unwrap_or("false");
     let dirty = matches!(git_dirty, "true" | "1" | "yes" | "dirty");
 
     if dirty {
-        format!("{binary} {pkg_version} (tag: {git_tag}, dirty commit: {git_commit})")
-    } else if git_tag != "untagged" {
-        format!("{binary} {pkg_version} (tag: {git_tag})")
+        format!("{binary} {git_tag} (dirty commit: {git_commit})")
     } else {
-        format!("{binary} {pkg_version} (commit: {git_commit})")
+        format!("{binary} {git_tag}")
     }
 }
 
