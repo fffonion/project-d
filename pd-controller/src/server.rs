@@ -14,7 +14,8 @@ use axum::{
     body::to_bytes,
     extract::{Path, Query, Request, State},
     http::{StatusCode, header::CONTENT_TYPE},
-    response::IntoResponse,
+    middleware::Next,
+    response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -27,7 +28,7 @@ use tokio::{
     sync::oneshot,
     time::{Duration, timeout},
 };
-use tracing::warn;
+use tracing::{info, warn};
 use uuid::Uuid;
 use vm::{SourceFlavor, compile_source_with_flavor, encode_program};
 
@@ -38,6 +39,9 @@ const PERSISTENCE_SCHEMA_VERSION: u32 = 1;
 const TIMESERIES_BINARY_MAGIC: [u8; 4] = *b"PDTS";
 const DEFAULT_REMOTE_DEBUGGER_TCP_ADDR: &str = "127.0.0.1:9002";
 const DEBUG_RESUME_GRACE_MS: u64 = 1_500;
+
+type DebugCommandWaiters =
+    tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<DebugCommandResponse, String>>>>;
 
 mod embedded_webui {
     include!(concat!(env!("OUT_DIR"), "/embedded_webui.rs"));
@@ -68,9 +72,7 @@ pub struct ControllerState {
     program_sequence: Arc<AtomicU64>,
     debug_sessions: Arc<tokio::sync::RwLock<HashMap<String, DebugSessionRecord>>>,
     debug_start_lookup: Arc<tokio::sync::RwLock<HashMap<String, String>>>,
-    debug_command_waiters: Arc<
-        tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<DebugCommandResponse, String>>>>,
-    >,
+    debug_command_waiters: Arc<DebugCommandWaiters>,
     persist_lock: Arc<tokio::sync::Mutex<()>>,
     config: ControllerConfig,
 }
@@ -1431,7 +1433,28 @@ pub fn build_controller_app(state: ControllerState) -> Router {
             "/v1/debug-sessions/{session_id}/command",
             post(run_debug_command_handler),
         )
+        .layer(axum::middleware::from_fn(access_log_middleware))
         .with_state(state)
+}
+
+async fn access_log_middleware(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let uri = request.uri().to_string();
+    let started = Instant::now();
+    let response = next.run(request).await;
+    let status = response.status();
+    let elapsed_ms = started.elapsed().as_millis();
+    if path != "/rpc/v1/edge/poll" {
+        info!(
+            method = %method,
+            uri = %uri,
+            status = status.as_u16(),
+            elapsed_ms = elapsed_ms,
+            "http access"
+        );
+    }
+    response
 }
 
 async fn healthz_handler() -> Json<StatusResponse> {
@@ -1718,9 +1741,7 @@ async fn create_program_version_handler(
         (nodes, edges, source)
     } else {
         let Some(source) = request.source.clone() else {
-            return Err(bad_request(
-                "source is required when flow_synced is false",
-            ));
+            return Err(bad_request("source is required when flow_synced is false"));
         };
         (Vec::new(), Vec::new(), source)
     };
@@ -1814,9 +1835,10 @@ async fn rpc_poll_handler(
 
     {
         let mut sessions = state.debug_sessions.write().await;
-        for session in sessions.values_mut().filter(|item| {
-            item.edge_id == resolved_edge_id || item.edge_id == request.edge_id
-        }) {
+        for session in sessions
+            .values_mut()
+            .filter(|item| item.edge_id == resolved_edge_id || item.edge_id == request.edge_id)
+        {
             if matches!(
                 session.phase,
                 DebugSessionPhase::Stopped | DebugSessionPhase::Failed
@@ -2864,7 +2886,7 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
         UiBlockDefinition {
             id: "get_header",
             title: "Get Header",
-            category: "http",
+            category: "http_request",
             description: "Read request header into a variable.",
             inputs: vec![
                 UiBlockInput {
@@ -2892,9 +2914,521 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
             accepts_flow: false,
         },
         UiBlockDefinition {
+            id: "string_concat",
+            title: "String Concat",
+            category: "string",
+            description: "Concatenate two string expressions into a variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "joined_text",
+                    placeholder: "joined_text",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "left",
+                    label: "Left",
+                    input_type: UiInputType::Text,
+                    default_value: "hello ",
+                    placeholder: "hello or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "right",
+                    label: "Right",
+                    input_type: UiInputType::Text,
+                    default_value: "world",
+                    placeholder: "world or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "string_length",
+            title: "String Length",
+            category: "string",
+            description: "Measure string length into a number variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "text_len",
+                    placeholder: "text_len",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "value",
+                    label: "Value",
+                    input_type: UiInputType::Text,
+                    default_value: "hello",
+                    placeholder: "hello or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "string_slice",
+            title: "String Slice",
+            category: "string",
+            description: "Slice string by start/length and store into a variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "text_slice",
+                    placeholder: "text_slice",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "value",
+                    label: "Value",
+                    input_type: UiInputType::Text,
+                    default_value: "hello",
+                    placeholder: "hello or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "start",
+                    label: "Start",
+                    input_type: UiInputType::Number,
+                    default_value: "0",
+                    placeholder: "0 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "length",
+                    label: "Length",
+                    input_type: UiInputType::Number,
+                    default_value: "3",
+                    placeholder: "3 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "math_add",
+            title: "Math Add",
+            category: "math",
+            description: "Add two numbers and store the result in a variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "math_sum",
+                    placeholder: "math_sum",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "lhs",
+                    label: "Left",
+                    input_type: UiInputType::Number,
+                    default_value: "1",
+                    placeholder: "1 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "rhs",
+                    label: "Right",
+                    input_type: UiInputType::Number,
+                    default_value: "1",
+                    placeholder: "1 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "math_subtract",
+            title: "Math Subtract",
+            category: "math",
+            description: "Subtract right number from left number.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "math_diff",
+                    placeholder: "math_diff",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "lhs",
+                    label: "Left",
+                    input_type: UiInputType::Number,
+                    default_value: "1",
+                    placeholder: "1 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "rhs",
+                    label: "Right",
+                    input_type: UiInputType::Number,
+                    default_value: "1",
+                    placeholder: "1 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "math_multiply",
+            title: "Math Multiply",
+            category: "math",
+            description: "Multiply two numbers and store the result.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "math_product",
+                    placeholder: "math_product",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "lhs",
+                    label: "Left",
+                    input_type: UiInputType::Number,
+                    default_value: "2",
+                    placeholder: "2 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "rhs",
+                    label: "Right",
+                    input_type: UiInputType::Number,
+                    default_value: "2",
+                    placeholder: "2 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "math_divide",
+            title: "Math Divide",
+            category: "math",
+            description: "Divide left number by right number.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "math_quotient",
+                    placeholder: "math_quotient",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "lhs",
+                    label: "Left",
+                    input_type: UiInputType::Number,
+                    default_value: "4",
+                    placeholder: "4 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "rhs",
+                    label: "Right",
+                    input_type: UiInputType::Number,
+                    default_value: "2",
+                    placeholder: "2 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "array_new",
+            title: "Array New",
+            category: "collection",
+            description: "Create an empty array variable.",
+            inputs: vec![UiBlockInput {
+                key: "var",
+                label: "Variable",
+                input_type: UiInputType::Text,
+                default_value: "items",
+                placeholder: "items",
+                connectable: false,
+            }],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "array_push",
+            title: "Array Push",
+            category: "collection",
+            description: "Append a value to an array and output the updated array.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "items_next",
+                    placeholder: "items_next",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "array",
+                    label: "Array",
+                    input_type: UiInputType::Text,
+                    default_value: "$items",
+                    placeholder: "$items",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "value",
+                    label: "Value",
+                    input_type: UiInputType::Text,
+                    default_value: "item",
+                    placeholder: "item or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "array_get",
+            title: "Array Get",
+            category: "collection",
+            description: "Read array index into a variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "item_value",
+                    placeholder: "item_value",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "array",
+                    label: "Array",
+                    input_type: UiInputType::Text,
+                    default_value: "$items",
+                    placeholder: "$items",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "index",
+                    label: "Index",
+                    input_type: UiInputType::Number,
+                    default_value: "0",
+                    placeholder: "0 or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "array_set",
+            title: "Array Set",
+            category: "collection",
+            description: "Set array index and output the updated array.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "items_next",
+                    placeholder: "items_next",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "array",
+                    label: "Array",
+                    input_type: UiInputType::Text,
+                    default_value: "$items",
+                    placeholder: "$items",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "index",
+                    label: "Index",
+                    input_type: UiInputType::Number,
+                    default_value: "0",
+                    placeholder: "0 or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "value",
+                    label: "Value",
+                    input_type: UiInputType::Text,
+                    default_value: "item",
+                    placeholder: "item or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "map_new",
+            title: "Map New",
+            category: "collection",
+            description: "Create an empty map variable.",
+            inputs: vec![UiBlockInput {
+                key: "var",
+                label: "Variable",
+                input_type: UiInputType::Text,
+                default_value: "map_value",
+                placeholder: "map_value",
+                connectable: false,
+            }],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "map_get",
+            title: "Map Get",
+            category: "collection",
+            description: "Read map key into a variable.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "map_item",
+                    placeholder: "map_item",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "map",
+                    label: "Map",
+                    input_type: UiInputType::Text,
+                    default_value: "$map_value",
+                    placeholder: "$map_value",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "key",
+                    label: "Key",
+                    input_type: UiInputType::Text,
+                    default_value: "key",
+                    placeholder: "key or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
+            id: "map_set",
+            title: "Map Set",
+            category: "collection",
+            description: "Set map key and output the updated map.",
+            inputs: vec![
+                UiBlockInput {
+                    key: "var",
+                    label: "Variable",
+                    input_type: UiInputType::Text,
+                    default_value: "map_next",
+                    placeholder: "map_next",
+                    connectable: false,
+                },
+                UiBlockInput {
+                    key: "map",
+                    label: "Map",
+                    input_type: UiInputType::Text,
+                    default_value: "$map_value",
+                    placeholder: "$map_value",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "key",
+                    label: "Key",
+                    input_type: UiInputType::Text,
+                    default_value: "key",
+                    placeholder: "key or $var",
+                    connectable: true,
+                },
+                UiBlockInput {
+                    key: "value",
+                    label: "Value",
+                    input_type: UiInputType::Text,
+                    default_value: "value",
+                    placeholder: "value or $var",
+                    connectable: true,
+                },
+            ],
+            outputs: vec![UiBlockOutput {
+                key: "value",
+                label: "value",
+                expr_from_input: Some("var"),
+            }],
+            accepts_flow: false,
+        },
+        UiBlockDefinition {
             id: "set_header",
             title: "Set Header",
-            category: "edge_abi",
+            category: "http_response",
             description: "Set response header via vm.set_header.",
             inputs: vec![
                 UiBlockInput {
@@ -2924,7 +3458,7 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
         UiBlockDefinition {
             id: "set_response_content",
             title: "Set Response Content",
-            category: "edge_abi",
+            category: "http_response",
             description: "Short-circuit request with response content.",
             inputs: vec![UiBlockInput {
                 key: "value",
@@ -2944,7 +3478,7 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
         UiBlockDefinition {
             id: "set_response_status",
             title: "Set Response Status",
-            category: "edge_abi",
+            category: "http_response",
             description: "Set response status code (used for short-circuit and upstream responses).",
             inputs: vec![UiBlockInput {
                 key: "status",
@@ -2964,7 +3498,7 @@ fn ui_block_catalog() -> Vec<UiBlockDefinition> {
         UiBlockDefinition {
             id: "set_upstream",
             title: "Set Upstream",
-            category: "edge_abi",
+            category: "routing",
             description: "Forward request to upstream host:port.",
             inputs: vec![UiBlockInput {
                 key: "upstream",
@@ -3453,7 +3987,26 @@ fn render_sources_with_flow(
 }
 
 fn is_value_block(block_id: &str) -> bool {
-    matches!(block_id, "const_string" | "const_number" | "get_header")
+    matches!(
+        block_id,
+        "const_string"
+            | "const_number"
+            | "get_header"
+            | "string_concat"
+            | "string_length"
+            | "string_slice"
+            | "math_add"
+            | "math_subtract"
+            | "math_multiply"
+            | "math_divide"
+            | "array_new"
+            | "array_push"
+            | "array_get"
+            | "array_set"
+            | "map_new"
+            | "map_get"
+            | "map_set"
+    )
 }
 
 fn is_flow_block(block_id: &str) -> bool {
@@ -3936,6 +4489,58 @@ fn render_number_expr(raw: &str, fallback: &str) -> String {
     }
 }
 
+fn is_dot_member_key(raw: &str) -> bool {
+    let Some(first) = raw.chars().next() else {
+        return false;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return false;
+    }
+    raw.chars()
+        .skip(1)
+        .all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn map_key_member_name(raw: &str) -> Option<&str> {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('$') || !is_dot_member_key(trimmed) {
+        return None;
+    }
+    Some(trimmed)
+}
+
+fn render_key_access_expr(
+    raw_container_expr: String,
+    raw_key: &str,
+    render_expr: fn(&str) -> String,
+) -> String {
+    if let Some(member) = map_key_member_name(raw_key) {
+        format!("({raw_container_expr}).{member}")
+    } else {
+        format!("({raw_container_expr})[{}]", render_expr(raw_key))
+    }
+}
+
+fn render_key_assignment_target(
+    target_ident: &str,
+    raw_key: &str,
+    render_expr: fn(&str) -> String,
+) -> String {
+    if let Some(member) = map_key_member_name(raw_key) {
+        format!("{target_ident}.{member}")
+    } else {
+        format!("{target_ident}[{}]", render_expr(raw_key))
+    }
+}
+
+fn render_scheme_hash_key_expr(raw_key: &str) -> String {
+    if let Some(member) = map_key_member_name(raw_key) {
+        member.to_string()
+    } else {
+        render_expr_scheme(raw_key)
+    }
+}
+
 fn render_sources(
     blocks: &[UiBlockInstance],
 ) -> Result<UiSourceBundle, (StatusCode, Json<ErrorResponse>)> {
@@ -4015,6 +4620,225 @@ fn render_single_block(
             scm.push(format!(
                 "(define {var} (vm.get_header {}))",
                 scheme_string(header_name)
+            ));
+        }
+        "string_concat" => {
+            let var = sanitize_identifier(block.values.get("var"), "joined_text");
+            let left = block_value(block, "left", "hello ");
+            let right = block_value(block, "right", "world");
+            rss.push(format!(
+                "let {var} = concat({}, {});",
+                render_expr_rss(left),
+                render_expr_rss(right)
+            ));
+            js.push(format!(
+                "let {var} = concat({}, {});",
+                render_expr_js(left),
+                render_expr_js(right)
+            ));
+            lua.push(format!(
+                "local {var} = concat({}, {})",
+                render_expr_lua(left),
+                render_expr_lua(right)
+            ));
+            scm.push(format!(
+                "(define {var} (concat {} {}))",
+                render_expr_scheme(left),
+                render_expr_scheme(right)
+            ));
+        }
+        "string_length" => {
+            let var = sanitize_identifier(block.values.get("var"), "text_len");
+            let value = block_value(block, "value", "hello");
+            rss.push(format!("let {var} = len({});", render_expr_rss(value)));
+            js.push(format!("let {var} = len({});", render_expr_js(value)));
+            lua.push(format!("local {var} = len({})", render_expr_lua(value)));
+            scm.push(format!(
+                "(define {var} (len {}))",
+                render_expr_scheme(value)
+            ));
+        }
+        "string_slice" => {
+            let var = sanitize_identifier(block.values.get("var"), "text_slice");
+            let value = block_value(block, "value", "hello");
+            let start = render_number_expr(block_value(block, "start", "0"), "0");
+            let length = render_number_expr(block_value(block, "length", "3"), "3");
+            rss.push(format!(
+                "let {var} = slice({}, {}, {});",
+                render_expr_rss(value),
+                start,
+                length
+            ));
+            js.push(format!(
+                "let {var} = slice({}, {}, {});",
+                render_expr_js(value),
+                start,
+                length
+            ));
+            lua.push(format!(
+                "local {var} = slice({}, {}, {})",
+                render_expr_lua(value),
+                start,
+                length
+            ));
+            scm.push(format!(
+                "(define {var} (slice {} {} {}))",
+                render_expr_scheme(value),
+                start,
+                length
+            ));
+        }
+        "math_add" => {
+            let var = sanitize_identifier(block.values.get("var"), "math_sum");
+            let lhs = render_number_expr(block_value(block, "lhs", "1"), "1");
+            let rhs = render_number_expr(block_value(block, "rhs", "1"), "1");
+            rss.push(format!("let {var} = {lhs} + {rhs};"));
+            js.push(format!("let {var} = {lhs} + {rhs};"));
+            lua.push(format!("local {var} = {lhs} + {rhs}"));
+            scm.push(format!("(define {var} (+ {lhs} {rhs}))"));
+        }
+        "math_subtract" => {
+            let var = sanitize_identifier(block.values.get("var"), "math_diff");
+            let lhs = render_number_expr(block_value(block, "lhs", "1"), "1");
+            let rhs = render_number_expr(block_value(block, "rhs", "1"), "1");
+            rss.push(format!("let {var} = {lhs} - {rhs};"));
+            js.push(format!("let {var} = {lhs} - {rhs};"));
+            lua.push(format!("local {var} = {lhs} - {rhs}"));
+            scm.push(format!("(define {var} (- {lhs} {rhs}))"));
+        }
+        "math_multiply" => {
+            let var = sanitize_identifier(block.values.get("var"), "math_product");
+            let lhs = render_number_expr(block_value(block, "lhs", "2"), "2");
+            let rhs = render_number_expr(block_value(block, "rhs", "2"), "2");
+            rss.push(format!("let {var} = {lhs} * {rhs};"));
+            js.push(format!("let {var} = {lhs} * {rhs};"));
+            lua.push(format!("local {var} = {lhs} * {rhs}"));
+            scm.push(format!("(define {var} (* {lhs} {rhs}))"));
+        }
+        "math_divide" => {
+            let var = sanitize_identifier(block.values.get("var"), "math_quotient");
+            let lhs = render_number_expr(block_value(block, "lhs", "4"), "4");
+            let rhs = render_number_expr(block_value(block, "rhs", "2"), "2");
+            rss.push(format!("let {var} = {lhs} / {rhs};"));
+            js.push(format!("let {var} = {lhs} / {rhs};"));
+            lua.push(format!("local {var} = {lhs} / {rhs}"));
+            scm.push(format!("(define {var} (/ {lhs} {rhs}))"));
+        }
+        "array_new" => {
+            let var = sanitize_identifier(block.values.get("var"), "items");
+            rss.push(format!("let {var} = [];"));
+            js.push(format!("let {var} = [];"));
+            lua.push(format!("local {var} = []"));
+            scm.push(format!("(define {var} (vector))"));
+        }
+        "array_push" => {
+            let var = sanitize_identifier(block.values.get("var"), "items_next");
+            let array = block_value(block, "array", "$items");
+            let value = block_value(block, "value", "item");
+            rss.push(format!("let {var} = {};", render_expr_rss(array)));
+            rss.push(format!("{var}[len({var})] = {};", render_expr_rss(value)));
+            js.push(format!("let {var} = {};", render_expr_js(array)));
+            js.push(format!("{var}[len({var})] = {};", render_expr_js(value)));
+            lua.push(format!("local {var} = {}", render_expr_lua(array)));
+            lua.push(format!("{var}[len({var})] = {}", render_expr_lua(value)));
+            scm.push(format!("(define {var} {})", render_expr_scheme(array)));
+            scm.push(format!(
+                "(vector-set! {var} (len {var}) {})",
+                render_expr_scheme(value)
+            ));
+        }
+        "array_get" => {
+            let var = sanitize_identifier(block.values.get("var"), "item_value");
+            let array = block_value(block, "array", "$items");
+            let index = render_number_expr(block_value(block, "index", "0"), "0");
+            rss.push(format!(
+                "let {var} = ({})[{index}];",
+                render_expr_rss(array)
+            ));
+            js.push(format!("let {var} = ({})[{index}];", render_expr_js(array)));
+            lua.push(format!(
+                "local {var} = ({})[{index}]",
+                render_expr_lua(array)
+            ));
+            scm.push(format!(
+                "(define {var} (vector-ref {} {index}))",
+                render_expr_scheme(array)
+            ));
+        }
+        "array_set" => {
+            let var = sanitize_identifier(block.values.get("var"), "items_next");
+            let array = block_value(block, "array", "$items");
+            let index = render_number_expr(block_value(block, "index", "0"), "0");
+            let value = block_value(block, "value", "item");
+            rss.push(format!("let {var} = {};", render_expr_rss(array)));
+            rss.push(format!("{var}[{index}] = {};", render_expr_rss(value)));
+            js.push(format!("let {var} = {};", render_expr_js(array)));
+            js.push(format!("{var}[{index}] = {};", render_expr_js(value)));
+            lua.push(format!("local {var} = {}", render_expr_lua(array)));
+            lua.push(format!("{var}[{index}] = {}", render_expr_lua(value)));
+            scm.push(format!("(define {var} {})", render_expr_scheme(array)));
+            scm.push(format!(
+                "(vector-set! {var} {index} {})",
+                render_expr_scheme(value)
+            ));
+        }
+        "map_new" => {
+            let var = sanitize_identifier(block.values.get("var"), "map_value");
+            rss.push(format!("let {var} = {{}};"));
+            js.push(format!("let {var} = {{}};"));
+            lua.push(format!("local {var} = {{}}"));
+            scm.push(format!("(define {var} (hash))"));
+        }
+        "map_get" => {
+            let var = sanitize_identifier(block.values.get("var"), "map_item");
+            let map = block_value(block, "map", "$map_value");
+            let key = block_value(block, "key", "key");
+            rss.push(format!(
+                "let {var} = {};",
+                render_key_access_expr(render_expr_rss(map), key, render_expr_rss)
+            ));
+            js.push(format!(
+                "let {var} = {};",
+                render_key_access_expr(render_expr_js(map), key, render_expr_js)
+            ));
+            lua.push(format!(
+                "local {var} = {}",
+                render_key_access_expr(render_expr_lua(map), key, render_expr_lua)
+            ));
+            scm.push(format!(
+                "(define {var} (hash-ref {} {}))",
+                render_expr_scheme(map),
+                render_scheme_hash_key_expr(key)
+            ));
+        }
+        "map_set" => {
+            let var = sanitize_identifier(block.values.get("var"), "map_next");
+            let map = block_value(block, "map", "$map_value");
+            let key = block_value(block, "key", "key");
+            let value = block_value(block, "value", "value");
+            rss.push(format!("let {var} = {};", render_expr_rss(map)));
+            rss.push(format!(
+                "{} = {};",
+                render_key_assignment_target(&var, key, render_expr_rss),
+                render_expr_rss(value)
+            ));
+            js.push(format!("let {var} = {};", render_expr_js(map)));
+            js.push(format!(
+                "{} = {};",
+                render_key_assignment_target(&var, key, render_expr_js),
+                render_expr_js(value)
+            ));
+            lua.push(format!("local {var} = {}", render_expr_lua(map)));
+            lua.push(format!(
+                "{} = {}",
+                render_key_assignment_target(&var, key, render_expr_lua),
+                render_expr_lua(value)
+            ));
+            scm.push(format!("(define {var} {})", render_expr_scheme(map)));
+            scm.push(format!(
+                "(hash-set! {var} {} {})",
+                render_scheme_hash_key_expr(key),
+                render_expr_scheme(value)
             ));
         }
         "set_header" => {

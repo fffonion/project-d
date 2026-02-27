@@ -17,6 +17,16 @@ It implements:
 cargo run -p pd-controller
 ```
 
+## Docker image
+
+Release workflow publishes `fffonion/pd-controller:<tag>` and `fffonion/pd-controller:latest`.
+
+Run controller with published image:
+
+```powershell
+docker run --rm -p 9100:9100 fffonion/pd-controller:latest
+```
+
 Version metadata:
 
 ```powershell

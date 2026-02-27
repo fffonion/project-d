@@ -270,6 +270,64 @@ async fn ui_blocks_and_deploy_endpoints_work() {
             .iter()
             .any(|item| item["id"].as_str() == Some("set_response_content"))
     );
+    assert!(
+        blocks_json["blocks"]
+            .as_array()
+            .expect("blocks should be an array")
+            .iter()
+            .any(|item| item["id"].as_str() == Some("string_concat"))
+    );
+    assert!(
+        blocks_json["blocks"]
+            .as_array()
+            .expect("blocks should be an array")
+            .iter()
+            .any(|item| item["id"].as_str() == Some("math_add"))
+    );
+    assert!(
+        blocks_json["blocks"]
+            .as_array()
+            .expect("blocks should be an array")
+            .iter()
+            .any(|item| item["id"].as_str() == Some("array_push"))
+    );
+    assert!(
+        blocks_json["blocks"]
+            .as_array()
+            .expect("blocks should be an array")
+            .iter()
+            .any(|item| item["id"].as_str() == Some("map_set"))
+    );
+    let blocks = blocks_json["blocks"]
+        .as_array()
+        .expect("blocks should be an array");
+    let get_header = blocks
+        .iter()
+        .find(|item| item["id"].as_str() == Some("get_header"))
+        .expect("get_header block should exist");
+    assert_eq!(
+        get_header["category"].as_str(),
+        Some("http_request"),
+        "get_header should be request-http scoped"
+    );
+    let set_response_content = blocks
+        .iter()
+        .find(|item| item["id"].as_str() == Some("set_response_content"))
+        .expect("set_response_content block should exist");
+    assert_eq!(
+        set_response_content["category"].as_str(),
+        Some("http_response"),
+        "set_response_content should be response-http scoped"
+    );
+    let set_upstream = blocks
+        .iter()
+        .find(|item| item["id"].as_str() == Some("set_upstream"))
+        .expect("set_upstream block should exist");
+    assert_eq!(
+        set_upstream["category"].as_str(),
+        Some("routing"),
+        "set_upstream should be routing scoped"
+    );
 
     let deploy = client
         .post(format!("http://{addr}/v1/ui/deploy"))
@@ -332,6 +390,235 @@ async fn ui_blocks_and_deploy_endpoints_work() {
         }
         other => panic!("unexpected command payload: {other:?}"),
     }
+
+    handle.abort();
+}
+
+#[tokio::test]
+async fn ui_render_extended_value_blocks_work_with_flow_graph() {
+    let (addr, handle, _state) = spawn_controller(ControllerConfig::default()).await;
+    let client = reqwest::Client::new();
+
+    let render = client
+        .post(format!("http://{addr}/v1/ui/render"))
+        .json(&serde_json::json!({
+            "nodes": [
+                {
+                    "id": "n1",
+                    "block_id": "const_string",
+                    "values": { "var": "first", "value": "hello " }
+                },
+                {
+                    "id": "n2",
+                    "block_id": "const_string",
+                    "values": { "var": "second", "value": "world" }
+                },
+                {
+                    "id": "n3",
+                    "block_id": "string_concat",
+                    "values": { "var": "joined", "left": "left", "right": "right" }
+                },
+                {
+                    "id": "n4",
+                    "block_id": "string_length",
+                    "values": { "var": "joined_len", "value": "value" }
+                },
+                {
+                    "id": "n5",
+                    "block_id": "const_number",
+                    "values": { "var": "status_base", "value": "200" }
+                },
+                {
+                    "id": "n6",
+                    "block_id": "math_add",
+                    "values": { "var": "status_plus_len", "lhs": "1", "rhs": "1" }
+                },
+                {
+                    "id": "n7",
+                    "block_id": "array_new",
+                    "values": { "var": "items" }
+                },
+                {
+                    "id": "n8",
+                    "block_id": "array_push",
+                    "values": { "var": "items_with_msg", "array": "$items", "value": "item" }
+                },
+                {
+                    "id": "n9",
+                    "block_id": "array_get",
+                    "values": { "var": "first_item", "array": "$items_with_msg", "index": "0" }
+                },
+                {
+                    "id": "n10",
+                    "block_id": "map_new",
+                    "values": { "var": "result_map" }
+                },
+                {
+                    "id": "n11",
+                    "block_id": "map_set",
+                    "values": { "var": "result_map_next", "map": "$result_map", "key": "body", "value": "value" }
+                },
+                {
+                    "id": "n12",
+                    "block_id": "map_get",
+                    "values": { "var": "response_body", "map": "$result_map_next", "key": "body" }
+                },
+                {
+                    "id": "n13",
+                    "block_id": "set_response_status",
+                    "values": { "status": "200" }
+                },
+                {
+                    "id": "n14",
+                    "block_id": "set_response_content",
+                    "values": { "value": "fallback" }
+                }
+            ],
+            "edges": [
+                {
+                    "source": "n1",
+                    "source_output": "value",
+                    "target": "n3",
+                    "target_input": "left"
+                },
+                {
+                    "source": "n2",
+                    "source_output": "value",
+                    "target": "n3",
+                    "target_input": "right"
+                },
+                {
+                    "source": "n3",
+                    "source_output": "value",
+                    "target": "n4",
+                    "target_input": "value"
+                },
+                {
+                    "source": "n5",
+                    "source_output": "value",
+                    "target": "n6",
+                    "target_input": "lhs"
+                },
+                {
+                    "source": "n4",
+                    "source_output": "value",
+                    "target": "n6",
+                    "target_input": "rhs"
+                },
+                {
+                    "source": "n7",
+                    "source_output": "value",
+                    "target": "n8",
+                    "target_input": "array"
+                },
+                {
+                    "source": "n3",
+                    "source_output": "value",
+                    "target": "n8",
+                    "target_input": "value"
+                },
+                {
+                    "source": "n8",
+                    "source_output": "value",
+                    "target": "n9",
+                    "target_input": "array"
+                },
+                {
+                    "source": "n10",
+                    "source_output": "value",
+                    "target": "n11",
+                    "target_input": "map"
+                },
+                {
+                    "source": "n9",
+                    "source_output": "value",
+                    "target": "n11",
+                    "target_input": "value"
+                },
+                {
+                    "source": "n11",
+                    "source_output": "value",
+                    "target": "n12",
+                    "target_input": "map"
+                },
+                {
+                    "source": "n6",
+                    "source_output": "value",
+                    "target": "n14",
+                    "target_input": "value"
+                },
+                {
+                    "source": "n13",
+                    "source_output": "next",
+                    "target": "n14",
+                    "target_input": "__flow"
+                }
+            ]
+        }))
+        .send()
+        .await
+        .expect("render request should complete");
+
+    assert_eq!(render.status(), reqwest::StatusCode::OK);
+    let render_json = render
+        .json::<serde_json::Value>()
+        .await
+        .expect("render payload should decode");
+    let rustscript = render_json["source"]["rustscript"]
+        .as_str()
+        .expect("rustscript source should be a string");
+    assert!(
+        rustscript.contains("let joined = concat(first, second);"),
+        "expected string concat line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let joined_len = len(joined);"),
+        "expected string length line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let status_plus_len = status_base + joined_len;"),
+        "expected math add line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let items = [];"),
+        "expected array_new line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let items_with_msg = items;"),
+        "expected array_push clone line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("items_with_msg[len(items_with_msg)] = joined;"),
+        "expected array_push append line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let first_item = (items_with_msg)[0];"),
+        "expected array_get line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let result_map = {};"),
+        "expected map_new line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let result_map_next = result_map;"),
+        "expected map_set clone line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("result_map_next.body = first_item;"),
+        "expected map_set assignment line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("let response_body = (result_map_next).body;"),
+        "expected map_get access line, got: {rustscript}"
+    );
+    assert!(
+        !rustscript.contains("array_push("),
+        "expected array_push line, got: {rustscript}"
+    );
+    assert!(
+        rustscript.contains("vm::set_response_content(status_plus_len);"),
+        "expected data edge into flow action, got: {rustscript}"
+    );
 
     handle.abort();
 }
