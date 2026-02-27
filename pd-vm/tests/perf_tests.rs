@@ -238,7 +238,7 @@ fn perf_compiler_speed_and_ram_usage() {
 }
 
 #[test]
-fn jit_emitted_machine_code_is_executed_on_x86_64() {
+fn jit_emitted_machine_code_is_executed_on_native_targets() {
     let source = r#"
         let i = 0;
         let sum = 0;
@@ -252,7 +252,7 @@ fn jit_emitted_machine_code_is_executed_on_x86_64() {
     let compiled = compile_source(source).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     vm.set_jit_config(JitConfig {
-        enabled: cfg!(target_arch = "x86_64"),
+        enabled: native_jit_supported(),
         hot_loop_threshold: 1,
         max_trace_len: 1_024,
     });
@@ -261,7 +261,7 @@ fn jit_emitted_machine_code_is_executed_on_x86_64() {
     assert_eq!(status, VmStatus::Halted);
     assert_eq!(vm.stack(), &[Value::Int(19_900)]);
 
-    if cfg!(target_arch = "x86_64") {
+    if native_jit_supported() {
         let native_trace_count = vm.jit_native_trace_count();
         let native_exec_count = vm.jit_native_exec_count();
         let dump = vm.dump_jit_info();
@@ -282,8 +282,8 @@ fn jit_emitted_machine_code_is_executed_on_x86_64() {
 #[test]
 #[ignore = "performance characterization test; run manually"]
 fn perf_jit_native_reduces_tight_loop_latency() {
-    if !cfg!(target_arch = "x86_64") {
-        println!("skipping latency comparison on non-x86_64 target");
+    if !native_jit_supported() {
+        println!("skipping latency comparison on unsupported native JIT target");
         return;
     }
 
@@ -361,6 +361,12 @@ fn perf_jit_native_reduces_tight_loop_latency() {
         interpreter_median,
         jit_median
     );
+}
+
+fn native_jit_supported() -> bool {
+    (cfg!(target_arch = "x86_64") && (cfg!(target_os = "linux") || cfg!(target_os = "windows")))
+        || (cfg!(target_arch = "aarch64")
+            && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
 }
 
 fn run_sum_loop_with_jit(

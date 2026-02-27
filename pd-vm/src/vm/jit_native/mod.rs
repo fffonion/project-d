@@ -1,6 +1,8 @@
 use super::{VmError, VmResult};
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+mod aarch64;
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
 mod x86_64;
 
 pub(super) const STATUS_CONTINUE: i32 = 0;
@@ -19,8 +21,10 @@ pub(super) trait NativeBackend {
     fn take_bridge_error() -> Option<VmError>;
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
 type ActiveBackend = x86_64::X86_64Backend;
+#[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
+type ActiveBackend = aarch64::AArch64Backend;
 
 pub(super) struct ExecutableMemory {
     pub(super) ptr: *mut u8,

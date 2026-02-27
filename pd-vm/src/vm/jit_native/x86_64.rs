@@ -44,9 +44,8 @@ impl BackendExecutableMemory {
             ));
         }
         let ptr = alloc_executable_region(len)?;
-        unsafe {
-            std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, len);
-        }
+        write_machine_code(ptr, code)?;
+        finalize_executable_region(ptr, len)?;
         Ok(Self { ptr, len })
     }
 }
@@ -1311,7 +1310,7 @@ fn emit_native_step_call_inline(
 ) -> VmResult<()> {
     let call_ip = u64::try_from(call_ip)
         .map_err(|_| VmError::JitNative("trace call_ip exceeds 64-bit range".to_string()))?;
-    let helper_addr = jit_native_step_call as *const () as usize;
+    let helper_addr = jit_native_call_bridge as *const () as usize;
     let helper_addr = u64::try_from(helper_addr).map_err(|_| {
         VmError::JitNative("native helper pointer exceeds 64-bit range".to_string())
     })?;
@@ -1612,7 +1611,7 @@ fn set_bridge_error(error: VmError) {
     });
 }
 
-extern "C" fn jit_native_step_call(vm_ptr: *mut Vm, index: u16, argc: u8, call_ip: u64) -> i32 {
+extern "C" fn jit_native_call_bridge(vm_ptr: *mut Vm, index: u16, argc: u8, call_ip: u64) -> i32 {
     if vm_ptr.is_null() {
         set_bridge_error(VmError::JitNative(
             "native trace call helper received null vm pointer".to_string(),
@@ -1639,6 +1638,55 @@ extern "C" fn jit_native_step_call(vm_ptr: *mut Vm, index: u16, argc: u8, call_i
             STATUS_ERROR
         }
     }
+}
+
+fn write_machine_code(ptr: *mut u8, code: &[u8]) -> VmResult<()> {
+    #[cfg(target_os = "macos")]
+    unsafe {
+        let use_write_protect = pthread_jit_write_protect_supported_np() != 0;
+        if use_write_protect {
+            pthread_jit_write_protect_np(0);
+        }
+        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
+        if use_write_protect {
+            pthread_jit_write_protect_np(1);
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    unsafe {
+        std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn finalize_executable_region(_ptr: *mut u8, _len: usize) -> VmResult<()> {
+    Ok(())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn finalize_executable_region(ptr: *mut u8, len: usize) -> VmResult<()> {
+    let rc = unsafe { libc::mprotect(ptr as *mut _, len, libc::PROT_READ | libc::PROT_EXEC) };
+    if rc != 0 {
+        return Err(VmError::JitNative(format!(
+            "mprotect(PROT_READ|PROT_EXEC) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn finalize_executable_region(_ptr: *mut u8, _len: usize) -> VmResult<()> {
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn pthread_jit_write_protect_supported_np() -> libc::c_int;
+    fn pthread_jit_write_protect_np(enabled: libc::c_int);
 }
 
 #[cfg(target_os = "windows")]
@@ -1687,7 +1735,7 @@ fn alloc_executable_region(len: usize) -> VmResult<*mut u8> {
         libc::mmap(
             std::ptr::null_mut(),
             len,
-            libc::PROT_READ | libc::PROT_WRITE | libc::PROT_EXEC,
+            libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_ANON | libc::MAP_PRIVATE,
             -1,
             0,

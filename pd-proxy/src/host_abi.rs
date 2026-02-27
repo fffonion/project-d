@@ -7,7 +7,6 @@ use std::{
 use axum::http::{HeaderMap, HeaderName, HeaderValue};
 use vm::{CallOutcome, HostFunction, Value, Vm, VmError};
 
-
 pub type SharedRateLimiter = Arc<Mutex<RateLimiterStore>>;
 
 #[derive(Debug, Default)]

@@ -13,11 +13,17 @@ pub struct JitConfig {
 impl Default for JitConfig {
     fn default() -> Self {
         Self {
-            enabled: cfg!(target_arch = "x86_64"),
+            enabled: native_jit_supported(),
             hot_loop_threshold: 8,
             max_trace_len: 256,
         }
     }
+}
+
+fn native_jit_supported() -> bool {
+    (cfg!(target_arch = "x86_64") && (cfg!(target_os = "linux") || cfg!(target_os = "windows")))
+        || (cfg!(target_arch = "aarch64")
+            && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,7 +48,9 @@ pub enum JitNyiReason {
 impl JitNyiReason {
     pub fn message(&self) -> String {
         match self {
-            JitNyiReason::UnsupportedArch => "target architecture is not x86_64".to_string(),
+            JitNyiReason::UnsupportedArch => {
+                "target architecture is not x86_64-linux/x86_64-windows/aarch64-linux/aarch64-macos".to_string()
+            }
             JitNyiReason::HotLoopThresholdZero => "hot_loop_threshold must be > 0".to_string(),
             JitNyiReason::UnsupportedOpcode(op) => format!("unsupported opcode 0x{op:02X}"),
             JitNyiReason::JumpToNonRoot { target } => {
@@ -177,7 +185,7 @@ impl TraceJitEngine {
         if !self.config.enabled {
             return None;
         }
-        if !cfg!(target_arch = "x86_64") {
+        if !native_jit_supported() {
             return None;
         }
         if let Some(&trace_id) = self.compiled_by_root.get(&ip) {
@@ -202,7 +210,7 @@ impl TraceJitEngine {
             .and_then(|debug| debug.line_for_offset(ip));
         let result = if self.config.hot_loop_threshold == 0 {
             Err(JitNyiReason::HotLoopThresholdZero)
-        } else if !cfg!(target_arch = "x86_64") {
+        } else if !native_jit_supported() {
             Err(JitNyiReason::UnsupportedArch)
         } else {
             self.compile_trace(program, ip)
@@ -600,8 +608,8 @@ fn nyi_reference() -> Vec<JitNyiDoc> {
             reason: "trace recording stops at max_trace_len",
         },
         JitNyiDoc {
-            item: "Non-x86_64 targets",
-            reason: "first implementation is gated to x86_64",
+            item: "Unsupported native JIT targets",
+            reason: "native emission currently supports x86_64 on linux/windows plus aarch64 on linux/macos",
         },
     ]
 }

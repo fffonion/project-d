@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(
+    all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
 mod jit_native;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -454,14 +457,23 @@ enum TraceExecOutcome {
     Yielded,
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(
+    all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
 type NativeTraceEntry = unsafe extern "C" fn(*mut Vm) -> i32;
 
-#[cfg(not(target_arch = "x86_64"))]
+#[cfg(not(any(
+    all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+)))]
 type NativeTraceEntry = fn(*mut Vm) -> i32;
 
 struct NativeTrace {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+        all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+    ))]
     _memory: jit_native::ExecutableMemory,
     entry: NativeTraceEntry,
     code: Vec<u8>,
@@ -755,7 +767,13 @@ impl Vm {
         Ok(StepExecOutcome::Continue)
     }
 
-    #[cfg_attr(target_arch = "x86_64", allow(dead_code))]
+    #[cfg_attr(
+        any(
+            all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+            all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+        ),
+        allow(dead_code)
+    )]
     fn execute_jit_trace(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         let Some(trace) = self.jit.trace_clone(trace_id) else {
             return Ok(TraceExecOutcome::Continue);
@@ -881,17 +899,26 @@ impl Vm {
     }
 
     fn execute_jit_entry(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
-        #[cfg(target_arch = "x86_64")]
+        #[cfg(any(
+            all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+            all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+        ))]
         {
             self.execute_jit_native(trace_id)
         }
-        #[cfg(not(target_arch = "x86_64"))]
+        #[cfg(not(any(
+            all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+            all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+        )))]
         {
             self.execute_jit_trace(trace_id)
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+        all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+    ))]
     fn execute_jit_native(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         self.ensure_native_trace(trace_id)?;
         let entry = {
@@ -923,7 +950,10 @@ impl Vm {
         }
     }
 
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(any(
+        all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")),
+        all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+    ))]
     fn ensure_native_trace(&mut self, trace_id: usize) -> VmResult<()> {
         if self.native_traces.contains_key(&trace_id) {
             return Ok(());

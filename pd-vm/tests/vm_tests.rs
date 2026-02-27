@@ -4,6 +4,12 @@ use vm::{
     compile_source_file, compile_source_with_flavor,
 };
 
+fn native_jit_supported() -> bool {
+    (cfg!(target_arch = "x86_64") && (cfg!(target_os = "linux") || cfg!(target_os = "windows")))
+        || (cfg!(target_arch = "aarch64")
+            && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
+}
+
 struct YieldOnce {
     yielded: bool,
 }
@@ -942,7 +948,7 @@ fn trace_jit_compiles_hot_loop_and_is_dumpable() {
     let compiled = compile_source(source).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     vm.set_jit_config(JitConfig {
-        enabled: cfg!(target_arch = "x86_64"),
+        enabled: native_jit_supported(),
         hot_loop_threshold: 1,
         max_trace_len: 512,
     });
@@ -953,7 +959,7 @@ fn trace_jit_compiles_hot_loop_and_is_dumpable() {
 
     let dump = vm.dump_jit_info();
     let snapshot = vm.jit_snapshot();
-    if cfg!(target_arch = "x86_64") {
+    if native_jit_supported() {
         assert!(
             !snapshot.traces.is_empty(),
             "expected at least one compiled trace, dump:\n{dump}"
@@ -986,7 +992,7 @@ fn compiler_uses_shl_for_power_of_two_multiply_and_jit_accepts_it() {
 
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     vm.set_jit_config(JitConfig {
-        enabled: cfg!(target_arch = "x86_64"),
+        enabled: native_jit_supported(),
         hot_loop_threshold: 1,
         max_trace_len: 512,
     });
@@ -995,7 +1001,7 @@ fn compiler_uses_shl_for_power_of_two_multiply_and_jit_accepts_it() {
     assert_eq!(status, VmStatus::Halted);
     assert_eq!(vm.stack(), &[Value::Int(224)]);
 
-    if cfg!(target_arch = "x86_64") {
+    if native_jit_supported() {
         let dump = vm.dump_jit_info();
         assert!(dump.contains(" shl"), "expected trace dump to include shl");
     }
@@ -1016,7 +1022,7 @@ fn trace_jit_supports_host_calls_with_native_mixed_mode() {
     let compiled = compile_source(source).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     vm.set_jit_config(JitConfig {
-        enabled: cfg!(target_arch = "x86_64"),
+        enabled: native_jit_supported(),
         hot_loop_threshold: 1,
         max_trace_len: 512,
     });
@@ -1033,7 +1039,7 @@ fn trace_jit_supports_host_calls_with_native_mixed_mode() {
 
     let dump = vm.dump_jit_info();
     let snapshot = vm.jit_snapshot();
-    if cfg!(target_arch = "x86_64") {
+    if native_jit_supported() {
         assert!(
             snapshot
                 .attempts
