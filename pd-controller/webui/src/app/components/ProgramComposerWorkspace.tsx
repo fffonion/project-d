@@ -125,7 +125,6 @@ export function ProgramComposerWorkspace({
           onDrop={onCanvasDrop}
         >
           <ReactFlow<FlowNode, FlowEdge>
-            key={`${selectedProgramId ?? "none"}:${selectedVersion ?? 0}:${graphCanvasRevision}`}
             nodes={nodes}
             edges={edges}
             nodeTypes={nodeTypes}
@@ -136,10 +135,9 @@ export function ProgramComposerWorkspace({
             onMoveEnd={(_, viewport) => onMoveEnd(viewport)}
             minZoom={0.2}
             maxZoom={2}
-            fitView
-            fitViewOptions={{ padding: 0.35 }}
+            defaultViewport={{ x: 0, y: 0, zoom: 0.5 }}
             defaultEdgeOptions={{
-              type: "bezier",
+              type: "default",
               animated: true,
               style: { stroke: "#22d3ee", strokeWidth: 2 }
             }}

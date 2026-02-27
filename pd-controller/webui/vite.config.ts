@@ -4,7 +4,9 @@ import path from "node:path";
 
 const controllerTarget = process.env.VITE_CONTROLLER_URL ?? "http://127.0.0.1:9100";
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  // Bundle is served by pd-controller at /ui and /ui/*.
+  base: command === "build" ? "/ui/" : "/",
   plugins: [react()],
   resolve: {
     alias: {
@@ -19,4 +21,4 @@ export default defineConfig({
       "/metrics": controllerTarget
     }
   }
-});
+}));

@@ -31,6 +31,7 @@ export function useDebugSessions({ onError, edgeSummaries, showDebugSessionsSect
   const [debugCommandLoading, setDebugCommandLoading] = useState(false);
   const [debugHoveredVar, setDebugHoveredVar] = useState<string>("");
   const [debugHoverValue, setDebugHoverValue] = useState<string>("");
+  const [debugEditorReadyTick, setDebugEditorReadyTick] = useState(0);
 
   const debugEditorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const debugMonacoRef = useRef<typeof import("monaco-editor") | null>(null);
@@ -222,9 +223,15 @@ export function useDebugSessions({ onError, edgeSummaries, showDebugSessionsSect
   const onDebugEditorMount: OnMount = useCallback((editor, monaco) => {
     debugEditorRef.current = editor;
     debugMonacoRef.current = monaco;
+    setDebugEditorReadyTick((value) => value + 1);
     editor.updateOptions({
       readOnly: true,
-      glyphMargin: true
+      glyphMargin: true,
+      hover: {
+        enabled: true,
+        delay: 220,
+        sticky: true
+      }
     });
 
     editor.onMouseDown((event) => {
@@ -347,7 +354,7 @@ export function useDebugSessions({ onError, edgeSummaries, showDebugSessionsSect
       debugHoverProviderDisposableRef.current?.dispose();
       debugHoverProviderDisposableRef.current = null;
     };
-  }, [resolveDebugHoverValue, selectedDebugSessionId, selectedDebugSession?.source_code, selectedDebugSession?.source_flavor]);
+  }, [debugEditorReadyTick, resolveDebugHoverValue, selectedDebugSessionId, selectedDebugSession?.source_code, selectedDebugSession?.source_flavor]);
 
   useEffect(() => {
     const editor = debugEditorRef.current;
@@ -382,7 +389,7 @@ export function useDebugSessions({ onError, edgeSummaries, showDebugSessionsSect
       });
     }
     debugDecorationIdsRef.current = editor.deltaDecorations(debugDecorationIdsRef.current, decorations);
-  }, [selectedDebugSession?.source_code, selectedDebugSession?.current_line, selectedDebugSession?.breakpoints]);
+  }, [debugEditorReadyTick, selectedDebugSession?.source_code, selectedDebugSession?.current_line, selectedDebugSession?.breakpoints]);
 
   useEffect(() => {
     debugHoverCacheRef.current.clear();

@@ -5,7 +5,8 @@ import type {
   ProgramDetailResponse,
   ProgramListResponse,
   ProgramSummary,
-  ProgramVersionResponse
+  ProgramVersionResponse,
+  UiGraphNode
 } from "@/app/types";
 import { initialSource } from "@/app/types";
 import type { ComposerProgramApi } from "@/app/hooks/useComposer";
@@ -21,7 +22,9 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
   const {
     activeFlavor,
     edges,
+    getGraphSnapshot,
     isCodeEditMode,
+    loadBlocks,
     nodes,
     source,
     setActiveFlavor,
@@ -51,6 +54,25 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
 
   const programLoadSeqRef = useRef(0);
   const programLoadAbortRef = useRef<AbortController | null>(null);
+  const programStateEpochRef = useRef(0);
+
+  const cancelProgramDetailLoads = useCallback(() => {
+    programLoadSeqRef.current += 1;
+    programLoadAbortRef.current?.abort();
+    programLoadAbortRef.current = null;
+  }, []);
+
+  const resolveFlowNodesWithBlockRetry = useCallback(
+    async (graphNodes: UiGraphNode[]) => {
+      let mapped = toFlowNodes(graphNodes);
+      if (graphNodes.length > 0 && mapped.skippedNodes > 0) {
+        await loadBlocks();
+        mapped = toFlowNodes(graphNodes);
+      }
+      return mapped;
+    },
+    [loadBlocks, toFlowNodes]
+  );
 
   const loadPrograms = useCallback(async () => {
     const response = await fetch("/v1/programs");
@@ -63,19 +85,23 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
 
   useEffect(() => {
     return () => {
-      programLoadAbortRef.current?.abort();
+      cancelProgramDetailLoads();
       clearHydrationState();
     };
-  }, [clearHydrationState]);
+  }, [cancelProgramDetailLoads, clearHydrationState]);
 
   const loadProgramDetail = useCallback(
     async (programId: string, preferredVersion?: number | null) => {
+      const requestEpoch = programStateEpochRef.current;
       const requestSeq = programLoadSeqRef.current + 1;
       programLoadSeqRef.current = requestSeq;
       programLoadAbortRef.current?.abort();
       const controller = new AbortController();
       programLoadAbortRef.current = controller;
-      const isCurrent = () => programLoadSeqRef.current === requestSeq && !controller.signal.aborted;
+      const isCurrent = () =>
+        programLoadSeqRef.current === requestSeq &&
+        programStateEpochRef.current === requestEpoch &&
+        !controller.signal.aborted;
 
       try {
         const detailResp = await fetch(`/v1/programs/${programId}`, { signal: controller.signal });
@@ -129,7 +155,7 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
           return;
         }
 
-        const { loadedNodes, skippedNodes } = toFlowNodes(version.detail.nodes);
+        const { loadedNodes, skippedNodes } = await resolveFlowNodesWithBlockRetry(version.detail.nodes);
         if (!isCurrent()) {
           clearHydrationState();
           return;
@@ -141,6 +167,9 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
         if (version.detail.nodes.length > 0 && loadedNodes.length === 0) {
           clearHydrationState();
           throw new Error(`failed to load program graph: ${skippedNodes} node(s) use unknown block types`);
+        }
+        if (skippedNodes > 0) {
+          onError(`loaded graph skipped ${skippedNodes} node(s) with unknown block types`);
         }
 
         const loadedEdges = toFlowEdges(version.detail.edges, loadedNodes);
@@ -161,12 +190,14 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
         }
       }
     },
-    [clearGraphForCodeVersion, clearHydrationState, hydrateGraph, onError, setActiveFlavor, setGraphStatus, setIsCodeEditMode, setSource, toFlowNodes]
+    [clearGraphForCodeVersion, clearHydrationState, hydrateGraph, onError, resolveFlowNodesWithBlockRetry, setActiveFlavor, setGraphStatus, setIsCodeEditMode, setSource]
   );
 
   const selectProgram = useCallback(
     async (programId: string) => {
       setSelectedProgramId(programId);
+      setSelectedProgram(null);
+      setSelectedVersion(null);
       setProgramView("composer");
       setGraphStatus("");
       onError("");
@@ -293,20 +324,26 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
   );
 
   const saveProgramVersion = useCallback(async () => {
+    const { nodes: snapshotNodes, edges: snapshotEdges } = getGraphSnapshot();
+    const saveNodes = snapshotNodes.length > 0 ? snapshotNodes : nodes;
+    const saveEdges = snapshotEdges.length > 0 ? snapshotEdges : edges;
     if (!selectedProgramId) {
       onError("select a program first");
       return;
     }
-    if (!isCodeEditMode && nodes.length === 0) {
+    if (!isCodeEditMode && saveNodes.length === 0) {
       onError("graph is empty");
       return;
     }
     setSavingVersion(true);
     onError("");
     try {
+      programStateEpochRef.current += 1;
+      // Prevent stale detail loads from clobbering graph/source right after save.
+      cancelProgramDetailLoads();
       const body = isCodeEditMode
         ? { flavor: activeFlavor, flow_synced: false, source }
-        : { flavor: activeFlavor, flow_synced: true, ...graphPayload(nodes, edges) };
+        : { flavor: activeFlavor, flow_synced: true, ...graphPayload(saveNodes, saveEdges) };
       const response = await fetch(`/v1/programs/${selectedProgramId}/versions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -316,28 +353,37 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
         throw new Error(await response.text());
       }
       const saved = (await response.json()) as ProgramVersionResponse;
-      setSelectedVersion(saved.detail.version);
       setActiveFlavor(normalizeFlavor(saved.detail.flavor));
       setSource(saved.detail.source);
       setIsCodeEditMode(!saved.detail.flow_synced);
-      if (saved.detail.flow_synced) {
-        const { loadedNodes, skippedNodes } = toFlowNodes(saved.detail.nodes);
-        if (saved.detail.nodes.length === 0 || loadedNodes.length === 0) {
-          throw new Error(
-            saved.detail.nodes.length === 0
-              ? "saved version payload contains no nodes"
-              : `saved version references ${skippedNodes} unknown block type(s)`
-          );
-        }
-        const loadedEdges = toFlowEdges(saved.detail.edges, loadedNodes);
-        hydrateGraph(loadedNodes, loadedEdges);
-      } else {
+      // Keep the current local graph as the source of truth immediately after save.
+      // Rehydrating from the server payload here can race and drop transient edge state.
+      if (!saved.detail.flow_synced) {
         clearGraphForCodeVersion();
       }
-      await loadPrograms();
-      await loadProgramDetail(selectedProgramId, saved.detail.version).catch(() => {
-        // Keep the already-hydrated graph if refresh race fails.
+      setSelectedVersion(saved.detail.version);
+      setSelectedProgram((current) => {
+        if (!current || current.program_id !== selectedProgramId) {
+          return current;
+        }
+        const nextVersion = {
+          version: saved.detail.version,
+          created_unix_ms: saved.detail.created_unix_ms,
+          flavor: saved.detail.flavor,
+          flow_synced: saved.detail.flow_synced
+        };
+        const versions = current.versions.some((item) => item.version === nextVersion.version)
+          ? current.versions.map((item) => (item.version === nextVersion.version ? nextVersion : item))
+          : [...current.versions, nextVersion];
+        versions.sort((lhs, rhs) => lhs.version - rhs.version);
+        return {
+          ...current,
+          latest_version: Math.max(current.latest_version, saved.detail.version),
+          updated_unix_ms: Math.max(current.updated_unix_ms, saved.detail.created_unix_ms),
+          versions
+        };
       });
+      await loadPrograms();
       setGraphStatus(
         saved.detail.flow_synced
           ? `saved version v${saved.detail.version}`
@@ -348,7 +394,7 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
     } finally {
       setSavingVersion(false);
     }
-  }, [activeFlavor, clearGraphForCodeVersion, edges, hydrateGraph, isCodeEditMode, loadProgramDetail, loadPrograms, nodes, onError, selectedProgramId, setActiveFlavor, setGraphStatus, setIsCodeEditMode, setSource, source, toFlowNodes]);
+  }, [activeFlavor, cancelProgramDetailLoads, clearGraphForCodeVersion, edges, getGraphSnapshot, isCodeEditMode, loadPrograms, nodes, onError, selectedProgramId, setActiveFlavor, setGraphStatus, setIsCodeEditMode, setSource, source]);
 
   const filteredPrograms = useMemo(() => {
     const keyword = programSearch.trim().toLowerCase();

@@ -35,9 +35,11 @@ type UseComposerArgs = {
 export type ComposerProgramApi = {
   activeFlavor: SourceFlavor;
   edges: FlowEdge[];
+  getGraphSnapshot: () => { nodes: FlowNode[]; edges: FlowEdge[] };
   isCodeEditMode: boolean;
   nodes: FlowNode[];
   source: UiSourceBundle;
+  loadBlocks: () => Promise<void>;
   setActiveFlavor: (value: SourceFlavor) => void;
   setSource: (value: UiSourceBundle) => void;
   setIsCodeEditMode: (value: boolean) => void;
@@ -57,17 +59,21 @@ export function useComposer({ onError }: UseComposerArgs) {
   const [source, setSourceState] = useState<UiSourceBundle>(initialSource);
   const [activeFlavorState, setActiveFlavorState] = useState<SourceFlavor>("rustscript");
   const [rendering, setRendering] = useState(false);
-  const [rfInstance, setRfInstance] = useState<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
   const [idSequence, setIdSequence] = useState(0);
   const [graphStatusState, setGraphStatusState] = useState("");
   const [graphCanvasRevision, setGraphCanvasRevision] = useState(0);
   const [paletteMinimized, setPaletteMinimized] = useState(false);
-  const [codePanelMinimized, setCodePanelMinimized] = useState(false);
+  const [codePanelMinimized, setCodePanelMinimized] = useState(true);
   const [isCodeEditModeState, setIsCodeEditModeState] = useState(false);
 
   const hydratingGraphRef = useRef(false);
+  const pendingFitViewRef = useRef(false);
   const flowZoomRef = useRef(0.5);
   const hydrationTimerRef = useRef<number | null>(null);
+  const rfInstanceRef = useRef<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
+  const definitionMapRef = useRef<Map<string, UiBlockDefinition>>(new Map());
+  const nodesRef = useRef<FlowNode[]>([]);
+  const edgesRef = useRef<FlowEdge[]>([]);
 
   const definitionMap = useMemo(() => {
     const map = new Map<string, UiBlockDefinition>();
@@ -76,6 +82,18 @@ export function useComposer({ onError }: UseComposerArgs) {
     }
     return map;
   }, [definitions]);
+
+  useEffect(() => {
+    definitionMapRef.current = definitionMap;
+  }, [definitionMap]);
+
+  useEffect(() => {
+    nodesRef.current = nodes;
+  }, [nodes]);
+
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
 
   const filteredDefinitions = useMemo(() => {
     const term = search.trim().toLowerCase();
@@ -94,15 +112,6 @@ export function useComposer({ onError }: UseComposerArgs) {
     }
   }, []);
 
-  const applyPreferredZoom = useCallback((instance: ReactFlowInstance<FlowNode, FlowEdge> | null) => {
-    if (!instance) {
-      return;
-    }
-    const zoom = Number.isFinite(flowZoomRef.current) ? flowZoomRef.current : 0.5;
-    const clamped = Math.min(2, Math.max(0.2, zoom));
-    instance.zoomTo(clamped, { duration: 120 });
-  }, []);
-
   const bumpGraphCanvasRevision = useCallback(() => {
     setGraphCanvasRevision((value) => value + 1);
   }, []);
@@ -114,8 +123,11 @@ export function useComposer({ onError }: UseComposerArgs) {
 
   const clearGraphForCodeVersion = useCallback(() => {
     clearHydrationState();
+    pendingFitViewRef.current = false;
     setNodes([]);
     setEdges([]);
+    flowZoomRef.current = 0.5;
+    rfInstanceRef.current?.setViewport({ x: 0, y: 0, zoom: 0.5 });
     bumpGraphCanvasRevision();
   }, [bumpGraphCanvasRevision, clearHydrationState]);
 
@@ -128,6 +140,7 @@ export function useComposer({ onError }: UseComposerArgs) {
   const hydrateGraph = useCallback(
     (loadedNodes: FlowNode[], loadedEdges: FlowEdge[], isCurrent?: () => boolean) => {
       hydratingGraphRef.current = true;
+      pendingFitViewRef.current = true;
       setNodes(loadedNodes);
       setEdges(loadedEdges);
       bumpGraphCanvasRevision();
@@ -137,12 +150,15 @@ export function useComposer({ onError }: UseComposerArgs) {
           return;
         }
         hydratingGraphRef.current = false;
-        rfInstance?.fitView({ padding: 0.35 });
-        applyPreferredZoom(rfInstance);
+        const instance = rfInstanceRef.current;
+        if (instance && pendingFitViewRef.current) {
+          instance.fitView({ padding: 0.35, duration: 140 });
+          pendingFitViewRef.current = false;
+        }
         hydrationTimerRef.current = null;
       }, 80);
     },
-    [applyPreferredZoom, bumpGraphCanvasRevision, clearHydrationTimer, rfInstance]
+    [bumpGraphCanvasRevision, clearHydrationTimer]
   );
 
   useEffect(() => {
@@ -157,6 +173,11 @@ export function useComposer({ onError }: UseComposerArgs) {
       throw new Error(`failed to load blocks (${response.status})`);
     }
     const data = (await response.json()) as UiBlocksResponse;
+    const nextMap = new Map<string, UiBlockDefinition>();
+    for (const definition of data.blocks) {
+      nextMap.set(definition.id, definition);
+    }
+    definitionMapRef.current = nextMap;
     setDefinitions(data.blocks);
   }, []);
 
@@ -206,9 +227,10 @@ export function useComposer({ onError }: UseComposerArgs) {
       const loadedNodes: FlowNode[] = [];
       let maxId = 0;
       let skippedNodes = 0;
+      const currentDefinitionMap = definitionMapRef.current;
       for (let index = 0; index < graphNodes.length; index += 1) {
         const graphNode = graphNodes[index];
-        const definition = definitionMap.get(graphNode.block_id);
+        const definition = currentDefinitionMap.get(graphNode.block_id);
         if (!definition) {
           skippedNodes += 1;
           continue;
@@ -235,7 +257,7 @@ export function useComposer({ onError }: UseComposerArgs) {
       setIdSequence(maxId);
       return { loadedNodes, skippedNodes };
     },
-    [definitionMap, removeNode, updateNodeValue]
+    [removeNode, updateNodeValue]
   );
 
   useEffect(() => {
@@ -307,6 +329,10 @@ export function useComposer({ onError }: UseComposerArgs) {
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => {
     if (hydratingGraphRef.current) {
+      const allowedHydrationChanges = changes.filter((change) => change.type === "dimensions");
+      if (allowedHydrationChanges.length > 0) {
+        setNodes((curr) => applyNodeChanges(allowedHydrationChanges, curr));
+      }
       return;
     }
     setNodes((curr) => applyNodeChanges(changes, curr));
@@ -358,7 +384,7 @@ export function useComposer({ onError }: UseComposerArgs) {
                 source_output: sourceHandle,
                 target_input: targetHandle
               },
-              type: "bezier",
+              type: "default",
               animated: true,
               style: { stroke: "#22d3ee", strokeWidth: 2 }
             },
@@ -373,10 +399,21 @@ export function useComposer({ onError }: UseComposerArgs) {
 
   const onFlowInit = useCallback(
     (instance: ReactFlowInstance<FlowNode, FlowEdge>) => {
-      setRfInstance(instance);
-      applyPreferredZoom(instance);
+      rfInstanceRef.current = instance;
+      if (!pendingFitViewRef.current) {
+        instance.setViewport({ x: 0, y: 0, zoom: flowZoomRef.current });
+      }
+      if (pendingFitViewRef.current) {
+        window.requestAnimationFrame(() => {
+          if (rfInstanceRef.current !== instance || !pendingFitViewRef.current) {
+            return;
+          }
+          instance.fitView({ padding: 0.35, duration: 140 });
+          pendingFitViewRef.current = false;
+        });
+      }
     },
-    [applyPreferredZoom]
+    []
   );
 
   const onFlowMoveEnd = useCallback((viewport: Viewport) => {
@@ -392,14 +429,61 @@ export function useComposer({ onError }: UseComposerArgs) {
     (event: DragEvent<HTMLDivElement>) => {
       event.preventDefault();
       const blockId = event.dataTransfer.getData("application/x-pd-block");
-      if (!blockId || !rfInstance) {
+      const instance = rfInstanceRef.current;
+      if (!blockId || !instance) {
         return;
       }
-      const position = rfInstance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
+      const position = instance.screenToFlowPosition({ x: event.clientX, y: event.clientY });
       addNode(blockId, position);
     },
-    [addNode, rfInstance]
+    [addNode]
   );
+
+  const getGraphSnapshot = useCallback(() => {
+    const instance = rfInstanceRef.current;
+    if (!instance) {
+      return { nodes: nodesRef.current, edges: edgesRef.current };
+    }
+    const instanceNodes = instance.getNodes() as FlowNode[];
+    const instanceEdges = instance.getEdges() as FlowEdge[];
+    if (instanceEdges.length === 0) {
+      return { nodes: instanceNodes, edges: edgesRef.current };
+    }
+    const fallbackById = new Map(edgesRef.current.map((edge) => [edge.id, edge]));
+    const mergedEdges = instanceEdges.map((edge) => {
+      const fallback = fallbackById.get(edge.id);
+      const sourceHandle =
+        edge.sourceHandle ??
+        edge.data?.source_output ??
+        fallback?.sourceHandle ??
+        fallback?.data?.source_output ??
+        null;
+      const targetHandle =
+        edge.targetHandle ??
+        edge.data?.target_input ??
+        fallback?.targetHandle ??
+        fallback?.data?.target_input ??
+        null;
+      return {
+        ...(fallback ?? {}),
+        ...edge,
+        sourceHandle: sourceHandle ?? undefined,
+        targetHandle: targetHandle ?? undefined,
+        data: {
+          ...(fallback?.data ?? {}),
+          ...(edge.data ?? {}),
+          ...(sourceHandle ? { source_output: sourceHandle } : {}),
+          ...(targetHandle ? { target_input: targetHandle } : {})
+        }
+      } as FlowEdge;
+    });
+    const normalizedEdges = normalizeFlowEdges(mergedEdges);
+    const edges = normalizedEdges.length === 0 ? edgesRef.current : normalizedEdges;
+    return {
+      nodes: instanceNodes,
+      edges
+    };
+  }, []);
 
   const selectedNodeCount = nodes.filter((node) => node.selected).length;
   const selectedEdgeCount = edges.filter((edge) => edge.selected).length;
@@ -411,6 +495,7 @@ export function useComposer({ onError }: UseComposerArgs) {
     setSearch,
     nodes,
     edges,
+    getGraphSnapshot,
     source,
     activeFlavor: activeFlavorState,
     rendering,

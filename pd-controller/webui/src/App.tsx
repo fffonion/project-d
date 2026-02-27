@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import "@xyflow/react/dist/style.css";
 
 import { DebugSessionsView } from "@/app/components/DebugSessionsView";
@@ -14,9 +14,52 @@ import { usePrograms } from "@/app/hooks/usePrograms";
 import type { Section } from "@/app/types";
 import { Card, CardContent } from "@/components/ui/card";
 
+type RouteState =
+  | { section: "edges"; edgeId?: string }
+  | { section: "programs"; programId?: string; version?: number }
+  | { section: "debug_sessions"; sessionId?: string };
+
+function parseRouteFromLocation(): RouteState {
+  const [rawHashPath, rawHashQuery = ""] = (window.location.hash.replace(/^#/, "") || "/edges").split("?");
+  const normalizedPath = rawHashPath.startsWith("/") ? rawHashPath : `/${rawHashPath}`;
+  const segments = normalizedPath
+    .split("/")
+    .filter((segment) => segment.length > 0)
+    .map((segment) => decodeURIComponent(segment));
+
+  if (segments.length === 0) {
+    return { section: "edges" };
+  }
+
+  if (segments[0] === "edges") {
+    return segments[1] ? { section: "edges", edgeId: segments[1] } : { section: "edges" };
+  }
+
+  if (segments[0] === "programs") {
+    if (!segments[1]) {
+      return { section: "programs" };
+    }
+    const versionParam = new URLSearchParams(rawHashQuery).get("version");
+    const parsedVersion = versionParam ? Number.parseInt(versionParam, 10) : Number.NaN;
+    return {
+      section: "programs",
+      programId: segments[1],
+      version: Number.isNaN(parsedVersion) ? undefined : parsedVersion
+    };
+  }
+
+  if (segments[0] === "debug-sessions" || segments[0] === "debug_sessions") {
+    return segments[1] ? { section: "debug_sessions", sessionId: segments[1] } : { section: "debug_sessions" };
+  }
+
+  return { section: "edges" };
+}
+
 export default function App() {
   const [section, setSection] = useState<Section>("edges");
   const [error, setError] = useState("");
+  const applyingRouteRef = useRef(false);
+  const routeSyncReadyRef = useRef(false);
 
   const composer = useComposer({ onError: setError });
   const edges = useEdges({ onError: setError });
@@ -32,21 +75,137 @@ export default function App() {
     showDebugSessionsSection: () => setSection("debug_sessions")
   });
 
+  const selectedApplyProgram = useMemo(
+    () => programs.programs.find((program) => program.program_id === edges.applyProgramId) ?? null,
+    [edges.applyProgramId, programs.programs]
+  );
+
+  const applyRoute = useCallback(
+    async (route: RouteState) => {
+      applyingRouteRef.current = true;
+      try {
+        if (route.section === "edges") {
+          setSection("edges");
+          if (route.edgeId) {
+            await edges.selectEdge(route.edgeId);
+          } else {
+            edges.setEdgeView("list");
+          }
+          return;
+        }
+
+        if (route.section === "programs") {
+          setSection("programs");
+          if (route.programId) {
+            await programs.selectProgram(route.programId);
+            if (route.version !== undefined) {
+              await programs.selectProgramVersion(String(route.version));
+            }
+          } else {
+            programs.setProgramView("list");
+          }
+          return;
+        }
+
+        setSection("debug_sessions");
+        if (route.sessionId) {
+          await debugSessions.selectDebugSession(route.sessionId);
+        } else {
+          debugSessions.setDebugView("list");
+        }
+      } finally {
+        applyingRouteRef.current = false;
+      }
+    },
+    [
+      debugSessions.selectDebugSession,
+      debugSessions.setDebugView,
+      edges.selectEdge,
+      edges.setEdgeView,
+      programs.selectProgram,
+      programs.selectProgramVersion,
+      programs.setProgramView
+    ]
+  );
+
   useEffect(() => {
     Promise.all([
       composer.loadBlocks(),
       programs.loadPrograms(),
       edges.loadEdges(),
       debugSessions.loadDebugSessions()
-    ]).catch((err) => {
-      setError(err instanceof Error ? err.message : "failed to initialize ui");
-    });
-  }, [composer.loadBlocks, debugSessions.loadDebugSessions, edges.loadEdges, programs.loadPrograms]);
+    ])
+      .then(async () => {
+        await applyRoute(parseRouteFromLocation());
+      })
+      .catch((err) => {
+        setError(err instanceof Error ? err.message : "failed to initialize ui");
+      })
+      .finally(() => {
+        routeSyncReadyRef.current = true;
+      });
+    // Initial bootstrap should happen once; route/view changes are handled by hash sync effects.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  const selectedApplyProgram = useMemo(
-    () => programs.programs.find((program) => program.program_id === edges.applyProgramId) ?? null,
-    [edges.applyProgramId, programs.programs]
-  );
+  useEffect(() => {
+    const handlePopState = () => {
+      void applyRoute(parseRouteFromLocation());
+    };
+    window.addEventListener("popstate", handlePopState);
+    return () => {
+      window.removeEventListener("popstate", handlePopState);
+    };
+  }, [applyRoute]);
+
+  const currentRoute = useMemo(() => {
+    if (section === "edges") {
+      if (edges.edgeView === "detail" && edges.selectedEdgeId) {
+        return `#/edges/${encodeURIComponent(edges.selectedEdgeId)}`;
+      }
+      return "#/edges";
+    }
+    if (section === "programs") {
+      if (programs.programView === "composer" && programs.selectedProgramId) {
+        const base = `#/programs/${encodeURIComponent(programs.selectedProgramId)}`;
+        const versionBelongsToSelectedProgram =
+          programs.selectedProgram?.program_id === programs.selectedProgramId &&
+          programs.selectedVersion !== null &&
+          (programs.selectedVersion === 0 ||
+            programs.selectedProgram.versions.some((item) => item.version === programs.selectedVersion));
+        if (versionBelongsToSelectedProgram) {
+          return `${base}?version=${programs.selectedVersion}`;
+        }
+        return base;
+      }
+      return "#/programs";
+    }
+    if (debugSessions.debugView === "detail" && debugSessions.selectedDebugSessionId) {
+      return `#/debug-sessions/${encodeURIComponent(debugSessions.selectedDebugSessionId)}`;
+    }
+    return "#/debug-sessions";
+  }, [
+    debugSessions.debugView,
+    debugSessions.selectedDebugSessionId,
+    edges.edgeView,
+    edges.selectedEdgeId,
+    programs.programView,
+    programs.selectedProgram,
+    programs.selectedProgramId,
+    programs.selectedVersion,
+    section
+  ]);
+
+  useEffect(() => {
+    if (!routeSyncReadyRef.current || applyingRouteRef.current) {
+      return;
+    }
+    const locationRoute = window.location.hash || "#/edges";
+    if (locationRoute === currentRoute) {
+      return;
+    }
+    window.history.pushState(null, "", currentRoute);
+  }, [currentRoute]);
 
   return (
     <div className="flex min-h-screen bg-background text-foreground">
