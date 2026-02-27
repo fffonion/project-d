@@ -454,16 +454,18 @@ impl EdgeRecord {
         max_result_history: usize,
         edge_name: String,
     ) -> EdgeRecord {
-        let mut record = EdgeRecord::default();
-        record.edge_name = edge_name;
-        record.applied_program = store.applied_program;
-        record.traffic_points = store.traffic_points;
-        record.last_traffic_cumulative = store.last_traffic_cumulative;
-        record.last_poll_unix_ms = store.last_poll_unix_ms;
-        record.last_result_unix_ms = store.last_result_unix_ms;
-        record.last_telemetry = store.last_telemetry;
-        record.total_polls = store.total_polls;
-        record.total_results = store.total_results;
+        let mut record = EdgeRecord {
+            edge_name,
+            applied_program: store.applied_program,
+            traffic_points: store.traffic_points,
+            last_traffic_cumulative: store.last_traffic_cumulative,
+            last_poll_unix_ms: store.last_poll_unix_ms,
+            last_result_unix_ms: store.last_result_unix_ms,
+            last_telemetry: store.last_telemetry,
+            total_polls: store.total_polls,
+            total_results: store.total_results,
+            ..EdgeRecord::default()
+        };
         record.recent_results.truncate(max_result_history.max(1));
         record
     }
@@ -617,15 +619,15 @@ fn write_timeseries_snapshot_to_disk(
 }
 
 fn write_bytes_to_disk(path: &FsPath, bytes: &[u8]) -> Result<(), String> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!(
-                    "failed to create controller state directory {}: {err}",
-                    parent.display()
-                )
-            })?;
-        }
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent).map_err(|err| {
+            format!(
+                "failed to create controller state directory {}: {err}",
+                parent.display()
+            )
+        })?;
     }
 
     let mut temp_name = path.as_os_str().to_os_string();
@@ -1616,10 +1618,10 @@ async fn rpc_result_handler(
         while record.recent_results.len() > state.config.max_result_history {
             let _ = record.recent_results.pop_front();
         }
-        if let Some(program_ref) = record.pending_apply_programs.remove(&command_id) {
-            if is_ok {
-                record.applied_program = Some(program_ref);
-            }
+        if let Some(program_ref) = record.pending_apply_programs.remove(&command_id)
+            && is_ok
+        {
+            record.applied_program = Some(program_ref);
         }
     }
 
@@ -3552,7 +3554,7 @@ fn render_single_block(
             ));
             lua.push("end".to_string());
 
-            scm.push(format!("(let loop ((i 0))"));
+            scm.push("(let loop ((i 0))".to_string());
             scm.push(format!("  (if (< i {count})"));
             scm.push(format!(
                 "      (begin (vm.set_header {} {}) (loop (+ i 1)))",

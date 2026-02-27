@@ -293,6 +293,16 @@ struct RuntimeMetrics {
     control_rpc_results_error_total: AtomicU64,
 }
 
+struct ProxyUpstreamInputs {
+    method: Method,
+    uri: Uri,
+    request_headers: HeaderMap,
+    request_body: Bytes,
+    upstream: String,
+    vm_response_headers: HeaderMap,
+    vm_response_status: Option<u16>,
+}
+
 impl Default for RuntimeMetrics {
     fn default() -> Self {
         Self {
@@ -429,28 +439,18 @@ async fn data_plane_handler(State(state): State<SharedState>, request: Request) 
             return finalize(&state, text_response(StatusCode::NOT_FOUND, "not found"));
         };
 
-        (
+        ProxyUpstreamInputs {
             method,
             uri,
-            parts.headers,
-            body_bytes,
+            request_headers: parts.headers,
+            request_body: body_bytes,
             upstream,
-            vm_outcome.response_headers,
-            vm_outcome.response_status,
-        )
+            vm_response_headers: vm_outcome.response_headers,
+            vm_response_status: vm_outcome.response_status,
+        }
     };
 
-    let response = proxy_to_upstream(
-        &state,
-        proxy_inputs.0,
-        proxy_inputs.1,
-        proxy_inputs.2,
-        proxy_inputs.3,
-        proxy_inputs.4,
-        proxy_inputs.5,
-        proxy_inputs.6,
-    )
-    .await;
+    let response = proxy_to_upstream(&state, proxy_inputs).await;
     finalize(&state, response)
 }
 
@@ -650,32 +650,24 @@ pub async fn apply_program_from_bytes(state: &SharedState, bytes: &[u8]) -> Prog
     }
 }
 
-async fn proxy_to_upstream(
-    state: &SharedState,
-    method: Method,
-    uri: Uri,
-    request_headers: HeaderMap,
-    request_body: Bytes,
-    upstream: String,
-    vm_response_headers: HeaderMap,
-    vm_response_status: Option<u16>,
-) -> Response<Body> {
-    let path_and_query = uri
+async fn proxy_to_upstream(state: &SharedState, inputs: ProxyUpstreamInputs) -> Response<Body> {
+    let path_and_query = inputs
+        .uri
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/");
-    let upstream_url = format!("http://{upstream}{path_and_query}");
+    let upstream_url = format!("http://{}{path_and_query}", inputs.upstream);
 
     let mut outbound = state
         .client
-        .request(method, upstream_url)
-        .body(request_body.to_vec());
-    for (name, value) in &request_headers {
+        .request(inputs.method, upstream_url)
+        .body(inputs.request_body.to_vec());
+    for (name, value) in &inputs.request_headers {
         if name != HOST && !is_hop_by_hop(name) {
             outbound = outbound.header(name, value);
         }
     }
-    outbound = outbound.header(HOST, upstream.as_str());
+    outbound = outbound.header(HOST, inputs.upstream.as_str());
 
     let upstream_response = match outbound.send().await {
         Ok(response) => response,
@@ -706,10 +698,13 @@ async fn proxy_to_upstream(
         }
     }
 
-    if let Some(status) = vm_response_status.and_then(|code| StatusCode::from_u16(code).ok()) {
+    if let Some(status) = inputs
+        .vm_response_status
+        .and_then(|code| StatusCode::from_u16(code).ok())
+    {
         *response.status_mut() = status;
     }
-    merge_headers(response.headers_mut(), &vm_response_headers);
+    merge_headers(response.headers_mut(), &inputs.vm_response_headers);
     response
 }
 

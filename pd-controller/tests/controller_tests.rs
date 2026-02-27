@@ -1,7 +1,7 @@
 use std::{
     fs,
     net::SocketAddr,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -60,11 +60,11 @@ fn unique_state_path(test_name: &str) -> PathBuf {
     std::env::temp_dir().join(format!("pd-controller-{test_name}-{now}-{seq}.json"))
 }
 
-fn snapshot_sidecar_paths(state_path: &PathBuf) -> (PathBuf, PathBuf) {
+fn snapshot_sidecar_paths(state_path: &Path) -> (PathBuf, PathBuf) {
     let parent = state_path
         .parent()
         .map(ToOwned::to_owned)
-        .unwrap_or_else(|| std::env::temp_dir());
+        .unwrap_or_else(std::env::temp_dir);
     let stem = state_path
         .file_stem()
         .and_then(|value| value.to_str())
