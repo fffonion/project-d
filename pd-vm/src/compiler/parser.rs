@@ -994,6 +994,9 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        if self.match_kind(&TokenKind::If) {
+            return self.parse_if_expr();
+        }
         if self.match_kind(&TokenKind::Match) {
             return self.parse_match_expr();
         }
@@ -1069,7 +1072,20 @@ impl Parser {
                             ),
                         });
                     }
-                    Expr::Call(builtin.call_index(), args)
+                    if builtin == BuiltinFunction::Concat {
+                        let mut args = args.into_iter();
+                        let lhs = args.next().ok_or_else(|| ParseError {
+                            line: self.current_line(),
+                            message: "concat expects two arguments".to_string(),
+                        })?;
+                        let rhs = args.next().ok_or_else(|| ParseError {
+                            line: self.current_line(),
+                            message: "concat expects two arguments".to_string(),
+                        })?;
+                        Expr::Add(Box::new(lhs), Box::new(rhs))
+                    } else {
+                        Expr::Call(builtin.call_index(), args)
+                    }
                 } else if let Some(host_name) = self.resolve_vm_direct_call_target(&name) {
                     let host_name = host_name.to_string();
                     self.build_vm_host_call_expr(&host_name, args)?
@@ -1111,6 +1127,44 @@ impl Parser {
             line: self.current_line(),
             message: "expected expression".to_string(),
         })
+    }
+
+    fn parse_if_expr(&mut self) -> Result<Expr, ParseError> {
+        let condition = self.parse_expr()?;
+        self.expect(
+            &TokenKind::FatArrow,
+            "expected '=>' after if condition in expression form",
+        )?;
+        let then_expr = self.parse_if_expr_branch()?;
+        self.expect(&TokenKind::Else, "if expression requires an else branch")?;
+        let else_expr = if self.match_kind(&TokenKind::If) {
+            self.parse_if_expr()?
+        } else {
+            self.expect(
+                &TokenKind::FatArrow,
+                "expected '=>' after else in expression form",
+            )?;
+            self.parse_if_expr_branch()?
+        };
+        Ok(Expr::IfElse {
+            condition: Box::new(condition),
+            then_expr: Box::new(then_expr),
+            else_expr: Box::new(else_expr),
+        })
+    }
+
+    fn parse_if_expr_branch(&mut self) -> Result<Expr, ParseError> {
+        self.expect(
+            &TokenKind::LBrace,
+            "expected '{' after '=>' in if expression branch",
+        )?;
+        let expr = self.parse_expr()?;
+        self.match_kind(&TokenKind::Semicolon);
+        self.expect(
+            &TokenKind::RBrace,
+            "expected '}' to close if expression branch",
+        )?;
+        Ok(expr)
     }
 
     fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {

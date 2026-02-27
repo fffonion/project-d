@@ -832,7 +832,7 @@ impl Vm {
                 self.stack.push(value);
             }
             x if x == OpCode::Add as u8 => {
-                self.binary_numeric_op(|lhs, rhs| Ok(lhs + rhs), |lhs, rhs| Ok(lhs + rhs))?;
+                self.binary_add_op()?;
             }
             x if x == OpCode::Sub as u8 => {
                 self.binary_numeric_op(|lhs, rhs| Ok(lhs - rhs), |lhs, rhs| Ok(lhs - rhs))?;
@@ -960,7 +960,7 @@ impl Vm {
                     self.stack.push(value);
                 }
                 crate::jit::TraceStep::Add => {
-                    self.binary_numeric_op(|lhs, rhs| Ok(lhs + rhs), |lhs, rhs| Ok(lhs + rhs))?;
+                    self.binary_add_op()?;
                 }
                 crate::jit::TraceStep::Sub => {
                     self.binary_numeric_op(|lhs, rhs| Ok(lhs - rhs), |lhs, rhs| Ok(lhs - rhs))?;
@@ -1263,6 +1263,37 @@ impl Vm {
 
     fn pop_bool(&mut self) -> VmResult<bool> {
         self.pop_value()?.as_bool()
+    }
+
+    fn binary_add_op(&mut self) -> VmResult<()> {
+        let rhs = self.pop_value()?;
+        let lhs = self.pop_value()?;
+        match (lhs, rhs) {
+            (Value::Int(lhs), Value::Int(rhs)) => {
+                self.stack.push(Value::Int(lhs + rhs));
+            }
+            (Value::Int(lhs), Value::Float(rhs)) => {
+                self.stack.push(Value::Float(lhs as f64 + rhs));
+            }
+            (Value::Float(lhs), Value::Int(rhs)) => {
+                self.stack.push(Value::Float(lhs + rhs as f64));
+            }
+            (Value::Float(lhs), Value::Float(rhs)) => {
+                self.stack.push(Value::Float(lhs + rhs));
+            }
+            (Value::String(mut lhs), Value::String(rhs)) => {
+                lhs.push_str(&rhs);
+                self.stack.push(Value::String(lhs));
+            }
+            (Value::Array(mut lhs), Value::Array(rhs)) => {
+                lhs.extend(rhs);
+                self.stack.push(Value::Array(lhs));
+            }
+            _ => {
+                return Err(VmError::TypeMismatch("number/string or array/array"));
+            }
+        }
+        Ok(())
     }
 
     fn binary_numeric_op(

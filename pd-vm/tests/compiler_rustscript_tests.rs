@@ -123,6 +123,59 @@ fn closure_captures_outer_value_at_definition_time() {
 }
 
 #[test]
+fn rustscript_if_expression_assignment_syntax_is_supported() {
+    let source = r#"
+        let x = if 2 > 1 => { 42 } else => { 0 };
+        x;
+    "#;
+
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn rustscript_if_expression_supports_else_if_chains() {
+    let source = r#"
+        let key = 2;
+        let out = if key == 1 => { 10 } else if key == 2 => { 20 } else => { 0 };
+        out;
+    "#;
+
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(20)]);
+}
+
+#[test]
+fn rustscript_if_expression_requires_else_branch() {
+    let source = r#"
+        let x = if true => { 1 };
+        x;
+    "#;
+
+    let err = match compile_source(source) {
+        Ok(_) => panic!("if expression without else should be rejected"),
+        Err(err) => err,
+    };
+    match err {
+        vm::SourceError::Parse(parse) => {
+            assert!(
+                parse.message.contains("requires an else branch"),
+                "unexpected parse error: {parse:?}"
+            );
+        }
+        other => panic!("expected parse error, got {other:?}"),
+    }
+}
+
+#[test]
 fn rustscript_match_expression_supports_int_and_wildcard_patterns() {
     let source = r#"
         let value = 2;

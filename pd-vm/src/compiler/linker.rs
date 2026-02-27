@@ -309,6 +309,15 @@ fn remap_expr_indices(
         Expr::Var(index) => {
             *index = remap_local_index(*index, local_base)?;
         }
+        Expr::IfElse {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            remap_expr_indices(condition, local_base, function_map)?;
+            remap_expr_indices(then_expr, local_base, function_map)?;
+            remap_expr_indices(else_expr, local_base, function_map)?;
+        }
         Expr::Match {
             value_slot,
             result_slot,

@@ -119,15 +119,15 @@ pub fn replace(value, needle, replacement) {
         let replace_output = "";
         while replace_index < replace_value_len {
             if replace_index + replace_needle_len > replace_value_len {
-                replace_output = concat(replace_output, slice(value, replace_index, 1));
+                replace_output = replace_output + slice(value, replace_index, 1);
                 replace_index = replace_index + 1;
             } else {
                 if equals(slice(value, replace_index, replace_needle_len), needle) {
-                    replace_output = concat(replace_output, replacement);
+                    replace_output = replace_output + replacement;
                     replace_index = replace_index + replace_needle_len;
                 } else {
                     replace_output =
-                        concat(replace_output, slice(value, replace_index, 1));
+                        replace_output + slice(value, replace_index, 1);
                     replace_index = replace_index + 1;
                 }
             }

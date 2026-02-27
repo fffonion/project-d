@@ -209,11 +209,11 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
 
 fn is_lua_require_line(line: &str) -> bool {
     let trimmed = line.trim().trim_end_matches(';').trim();
-    if trimmed.starts_with("require(") {
+    if parse_lua_require_call(trimmed).is_some() {
         return true;
     }
-    if let Some(rest) = trimmed.strip_prefix("local ") {
-        return rest.contains("= require(");
+    if let Some((_, rhs)) = parse_lua_local_assignment(trimmed) {
+        return parse_lua_require_call(rhs).is_some();
     }
     false
 }
@@ -273,7 +273,8 @@ fn lower_lua_vm_require_line(line: &str) -> Option<VmRequireImport> {
 }
 
 fn parse_lua_require_call(input: &str) -> Option<(String, String)> {
-    let mut rest = input.trim().strip_prefix("require(")?.trim_start();
+    let mut rest = input.trim().strip_prefix("require")?.trim_start();
+    rest = rest.strip_prefix('(')?.trim_start();
     let quote = rest.chars().next()?;
     if quote != '"' && quote != '\'' {
         return None;
@@ -320,14 +321,25 @@ fn parse_lua_local_assignment(line: &str) -> Option<(&str, &str)> {
 }
 
 fn rewrite_lua_inline_function_literal(line: &str, line_no: usize) -> Result<String, ParseError> {
-    let Some(function_index) = line.find("function(") else {
+    let Some(function_index) = line.find("function") else {
         return Ok(line.to_string());
     };
+    let function_end = function_index + "function".len();
+    if function_index > 0 {
+        let before = line[..function_index].chars().next_back();
+        if before.is_some_and(is_ident_continue) {
+            return Ok(line.to_string());
+        }
+    }
+    let after_keyword_char = line[function_end..].chars().next();
+    if after_keyword_char.is_some_and(is_ident_continue) {
+        return Ok(line.to_string());
+    }
     let prefix = &line[..function_index];
     if !prefix.contains('=') {
         return Ok(line.to_string());
     }
-    let after_keyword = &line[function_index + "function".len()..];
+    let after_keyword = line[function_end..].trim_start();
     if !after_keyword.starts_with('(') {
         return Ok(line.to_string());
     }

@@ -182,6 +182,11 @@ pub enum Expr {
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
     Var(u8),
+    IfElse {
+        condition: Box<Expr>,
+        then_expr: Box<Expr>,
+        else_expr: Box<Expr>,
+    },
     Match {
         value_slot: u8,
         result_slot: u8,
@@ -673,6 +678,25 @@ impl Compiler {
             }
             Expr::Var(index) => {
                 self.assembler.ldloc(*index);
+            }
+            Expr::IfElse {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.compile_expr(condition)?;
+                let else_label = self.fresh_label("if_else");
+                let end_label = self.fresh_label("if_end");
+                self.assembler.brfalse_label(&else_label);
+                self.compile_expr(then_expr)?;
+                self.assembler.br_label(&end_label);
+                self.assembler
+                    .label(&else_label)
+                    .map_err(CompileError::Assembler)?;
+                self.compile_expr(else_expr)?;
+                self.assembler
+                    .label(&end_label)
+                    .map_err(CompileError::Assembler)?;
             }
             Expr::Match {
                 value_slot,

@@ -308,6 +308,45 @@ fn collections_are_created_and_accessed_in_all_frontends() {
 }
 
 #[test]
+fn string_and_array_concat_work_via_plus_in_all_frontends() {
+    let rustscript = r#"
+        let joined = "he" + "llo";
+        let arr = [1] + [2];
+        len(joined) + arr[0] + arr[1];
+    "#;
+    let javascript = r#"
+        let joined = "he" + "llo";
+        let arr = [1] + [2];
+        len(joined) + arr[0] + arr[1];
+    "#;
+    let lua = r#"
+        local joined = "he" + "llo"
+        local arr = [1] + [2]
+        len(joined) + arr[0] + arr[1]
+    "#;
+    let scheme = r#"
+        (define joined (+ "he" "llo"))
+        (define arr (+ (vector 1) (vector 2)))
+        (+ (len joined) (vector-ref arr 0) (vector-ref arr 1))
+    "#;
+
+    let cases = [
+        (SourceFlavor::RustScript, rustscript),
+        (SourceFlavor::JavaScript, javascript),
+        (SourceFlavor::Lua, lua),
+        (SourceFlavor::Scheme, scheme),
+    ];
+
+    for (flavor, source) in cases {
+        let compiled = compile_source_with_flavor(source, flavor).expect("compile should succeed");
+        let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+        let status = vm.run().expect("vm should run");
+        assert_eq!(status, VmStatus::Halted);
+        assert_eq!(vm.stack(), &[Value::Int(8)]);
+    }
+}
+
+#[test]
 fn break_and_continue_outside_loop_are_rejected() {
     let break_err = match compile_source("break;") {
         Ok(_) => panic!("break outside loop should fail"),

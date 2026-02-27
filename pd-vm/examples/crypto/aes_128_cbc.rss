@@ -105,8 +105,8 @@ fn bytes_to_hex(values) {
     let n = len(values);
     while i < n {
         let byte = normalize_byte(values[i]);
-        out = concat(out, hex_digits[byte / 16]);
-        out = concat(out, hex_digits[modn(byte, 16)]);
+        out = out + hex_digits[byte / 16];
+        out = out + hex_digits[modn(byte, 16)];
         i = i + 1;
     }
     out;
