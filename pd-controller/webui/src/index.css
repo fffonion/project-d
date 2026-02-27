@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: 30 40% 98%;
+  --foreground: 215 25% 15%;
+  --card: 0 0% 100%;
+  --card-foreground: 215 25% 15%;
+  --primary: 196 92% 39%;
+  --primary-foreground: 0 0% 100%;
+  --secondary: 43 95% 58%;
+  --secondary-foreground: 215 25% 15%;
+  --muted: 210 30% 95%;
+  --muted-foreground: 215 16% 36%;
+  --border: 214 22% 86%;
+  --input: 214 22% 86%;
+  --ring: 196 92% 39%;
+  --radius: 0.7rem;
+}
+
+* {
+  @apply border-border;
+}
+
+html {
+  font-size: 18px;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: radial-gradient(circle at 10% 5%, #fff8dc 0%, transparent 40%),
+    radial-gradient(circle at 90% 0%, #d7f2ff 0%, transparent 35%),
+    hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: "Space Grotesk", "IBM Plex Sans", system-ui, sans-serif;
+}
