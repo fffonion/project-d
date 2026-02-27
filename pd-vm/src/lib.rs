@@ -25,5 +25,7 @@ pub use vm::{
     StaticHostFunction, Value, Vm, VmError, VmResult, VmStatus,
 };
 pub use wire::{
-    ValidationError, WireError, decode_program, encode_program, infer_local_count, validate_program,
+    DisassembleOptions, ValidationError, WireError, decode_program, disassemble_program,
+    disassemble_program_with_options, disassemble_vmbc, disassemble_vmbc_with_options,
+    encode_program, infer_local_count, validate_program,
 };

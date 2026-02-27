@@ -8,9 +8,10 @@ name = "vm"
 
 [[bin]]
 name = "pd-vm-run"
-path = "src/main.rs"
+path = "src/bin/pd-vm-run.rs"
 
 [dependencies]
+rustyline = "14"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Memory", "Win32_System_ProcessStatus", "Win32_System_Threading"] }

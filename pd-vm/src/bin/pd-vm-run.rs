@@ -1,9 +1,11 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use rustyline::DefaultEditor;
+use rustyline::error::ReadlineError;
 use vm::{
-    CallOutcome, Debugger, FunctionDecl, HostFunction, Value, Vm, VmError, VmStatus,
-    compile_source_file,
+    CallOutcome, Debugger, DisassembleOptions, FunctionDecl, HostFunction, Value, Vm, VmError,
+    VmStatus, compile_source, compile_source_file, disassemble_vmbc_with_options, encode_program,
 };
 
 const DEFAULT_SOURCE: &str = "examples/example.rss";
@@ -11,6 +13,10 @@ const DEFAULT_SOURCE: &str = "examples/example.rss";
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CliConfig {
     source: Option<String>,
+    emit_vmbc_path: Option<String>,
+    disasm_vmbc_path: Option<String>,
+    show_source: bool,
+    repl: bool,
     debug: bool,
     tcp_addr: Option<String>,
     stop_on_entry: bool,
@@ -23,6 +29,10 @@ impl Default for CliConfig {
     fn default() -> Self {
         Self {
             source: None,
+            emit_vmbc_path: None,
+            disasm_vmbc_path: None,
+            show_source: false,
+            repl: false,
             debug: false,
             tcp_addr: None,
             stop_on_entry: true,
@@ -40,9 +50,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print_usage();
         return Ok(());
     }
+    if cli.repl {
+        return run_repl();
+    }
+    if let Some(input_path) = cli.disasm_vmbc_path.as_ref() {
+        let bytes = std::fs::read(input_path)?;
+        let listing = disassemble_vmbc_with_options(
+            &bytes,
+            DisassembleOptions {
+                show_source: cli.show_source,
+            },
+        )?;
+        print!("{listing}");
+        return Ok(());
+    }
 
     let source_path = resolve_source_path(cli.source.as_deref())?;
     let compiled = compile_source_file(&source_path)?;
+    if let Some(output_path) = cli.emit_vmbc_path.as_ref() {
+        let encoded = encode_program(&compiled.program)?;
+        std::fs::write(output_path, &encoded)?;
+        println!("wrote {} bytes to {}", encoded.len(), output_path);
+        return Ok(());
+    }
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     if let Some(hot_loop) = cli.jit_hot_loop_threshold {
         let mut jit_config = vm.jit_config().clone();
@@ -99,6 +129,11 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     {
         cfg.debug = true;
         index = 1;
+    } else if let Some(first) = args.first()
+        && first == "repl"
+    {
+        cfg.repl = true;
+        index = 1;
     }
 
     while index < args.len() {
@@ -144,6 +179,28 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 cfg.jit_hot_loop_threshold = Some(value);
                 index += 2;
             }
+            "--emit-vmbc" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --emit-vmbc".to_string())?;
+                cfg.emit_vmbc_path = Some(path.clone());
+                index += 2;
+            }
+            "--disasm-vmbc" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --disasm-vmbc".to_string())?;
+                cfg.disasm_vmbc_path = Some(path.clone());
+                index += 2;
+            }
+            "--show-source" => {
+                cfg.show_source = true;
+                index += 1;
+            }
+            "--repl" => {
+                cfg.repl = true;
+                index += 1;
+            }
             value if value.starts_with('-') => {
                 return Err(format!("unknown flag '{value}'"));
             }
@@ -155,6 +212,41 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 index += 1;
             }
         }
+    }
+
+    if cfg.repl {
+        if cfg.source.is_some() {
+            return Err("repl mode does not accept a source path".to_string());
+        }
+        if cfg.debug
+            || cfg.tcp_addr.is_some()
+            || cfg.jit_dump
+            || cfg.jit_hot_loop_threshold.is_some()
+            || cfg.emit_vmbc_path.is_some()
+        {
+            return Err(
+                "repl mode cannot be combined with debug/jit/emit-vmbc runtime flags".to_string(),
+            );
+        }
+    }
+    if cfg.disasm_vmbc_path.is_some() {
+        if cfg.source.is_some() {
+            return Err("disasm mode does not accept a source path".to_string());
+        }
+        if cfg.repl
+            || cfg.debug
+            || cfg.tcp_addr.is_some()
+            || cfg.jit_dump
+            || cfg.jit_hot_loop_threshold.is_some()
+            || cfg.emit_vmbc_path.is_some()
+        {
+            return Err(
+                "disasm mode cannot be combined with repl/debug/jit/emit-vmbc runtime flags"
+                    .to_string(),
+            );
+        }
+    } else if cfg.show_source {
+        return Err("--show-source requires --disasm-vmbc".to_string());
     }
 
     Ok(cfg)
@@ -201,10 +293,115 @@ fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) -> Result<(), io:
 fn print_usage() {
     println!("Usage:");
     println!("  pd-vm-run [source_path]");
+    println!("  pd-vm-run --repl");
+    println!("  pd-vm-run repl");
+    println!("  pd-vm-run --emit-vmbc <output.vmbc> [source_path]");
+    println!("  pd-vm-run --disasm-vmbc <input.vmbc> [--show-source]");
     println!("  pd-vm-run --debug [--stop-on-entry|--no-stop-on-entry] [source_path]");
     println!("  pd-vm-run --debug --tcp <addr> [source_path]");
-    println!("  pd-vm-run [--jit-hot-loop <n>] [--jit-dump] [source_path]");
+    println!(
+        "  pd-vm-run [--jit-hot-loop <n>] [--jit-dump] [--emit-vmbc <output.vmbc>] [source_path]"
+    );
     println!("  pd-vm-run debug [--tcp <addr>] [source_path]");
+}
+
+fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
+    println!("pd-vm REPL (RustScript)");
+    println!("history: up/down arrows, commands: .help, .quit");
+    println!("note: each entry runs as an independent snippet");
+    let mut editor = DefaultEditor::new()?;
+    loop {
+        match editor.readline("pd-vm> ") {
+            Ok(line) => {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                if let Some(action) = handle_repl_command(line) {
+                    if action == ReplAction::Break {
+                        break;
+                    }
+                    continue;
+                }
+                let _ = editor.add_history_entry(line);
+                let compiled = match compile_repl_snippet(line) {
+                    Ok(compiled) => compiled,
+                    Err(err) => {
+                        println!("{err}");
+                        continue;
+                    }
+                };
+                let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+                if let Err(err) = register_functions(&mut vm, &compiled.functions) {
+                    println!("{err}");
+                    continue;
+                }
+                loop {
+                    match vm.run() {
+                        Ok(VmStatus::Halted) => {
+                            if let Some(value) = vm.stack().last() {
+                                println!("=> {}", format_value(value));
+                            } else {
+                                println!("=> <empty>");
+                            }
+                            break;
+                        }
+                        Ok(VmStatus::Yielded) => continue,
+                        Err(err) => {
+                            println!("runtime error: {err}");
+                            break;
+                        }
+                    }
+                }
+            }
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                println!("bye");
+                break;
+            }
+            Err(err) => {
+                return Err(Box::new(io::Error::other(err.to_string())));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplAction {
+    Continue,
+    Break,
+}
+
+fn handle_repl_command(line: &str) -> Option<ReplAction> {
+    match line {
+        ".quit" | ".exit" => Some(ReplAction::Break),
+        ".help" => {
+            println!("commands:");
+            println!("  .help      show commands");
+            println!("  .quit      quit repl");
+            println!("  .exit      quit repl");
+            Some(ReplAction::Continue)
+        }
+        _ if line.starts_with('.') => {
+            println!("unknown command: {line}");
+            Some(ReplAction::Continue)
+        }
+        _ => None,
+    }
+}
+
+fn compile_repl_snippet(input: &str) -> Result<vm::CompiledProgram, vm::SourceError> {
+    let trimmed = input.trim_end();
+    match compile_source(trimmed) {
+        Ok(compiled) => Ok(compiled),
+        Err(first_err) => {
+            if trimmed.ends_with(';') {
+                return Err(first_err);
+            }
+            let fallback = format!("{trimmed};");
+            compile_source(&fallback).map_err(|_| first_err)
+        }
+    }
 }
 
 struct PrintFunction;
@@ -298,12 +495,16 @@ mod tests {
     #[test]
     fn parse_cli_defaults() {
         let cfg = parse_cli_args(&[]).expect("parse should succeed");
+        assert!(!cfg.repl);
         assert!(!cfg.debug);
         assert!(cfg.tcp_addr.is_none());
         assert!(cfg.stop_on_entry);
         assert!(!cfg.jit_dump);
         assert!(cfg.jit_hot_loop_threshold.is_none());
         assert!(cfg.source.is_none());
+        assert!(cfg.emit_vmbc_path.is_none());
+        assert!(cfg.disasm_vmbc_path.is_none());
+        assert!(!cfg.show_source);
     }
 
     #[test]
@@ -346,5 +547,90 @@ mod tests {
         assert_eq!(cfg.jit_hot_loop_threshold, Some(2));
         assert!(cfg.jit_dump);
         assert_eq!(cfg.source.as_deref(), Some("examples/example.rss"));
+    }
+
+    #[test]
+    fn parse_cli_emit_vmbc_path() {
+        let cfg = parse_cli_args(&[
+            s("--emit-vmbc"),
+            s("out/program.vmbc"),
+            s("examples/example.rss"),
+        ])
+        .expect("parse should succeed");
+        assert_eq!(cfg.emit_vmbc_path.as_deref(), Some("out/program.vmbc"));
+        assert_eq!(cfg.source.as_deref(), Some("examples/example.rss"));
+    }
+
+    #[test]
+    fn parse_cli_emit_vmbc_requires_path() {
+        let err = parse_cli_args(&[s("--emit-vmbc")]).expect_err("parse should fail");
+        assert!(err.contains("missing value for --emit-vmbc"));
+    }
+
+    #[test]
+    fn parse_cli_disasm_vmbc_path() {
+        let cfg = parse_cli_args(&[
+            s("--disasm-vmbc"),
+            s("out/program.vmbc"),
+            s("--show-source"),
+        ])
+        .expect("parse should succeed");
+        assert_eq!(cfg.disasm_vmbc_path.as_deref(), Some("out/program.vmbc"));
+        assert!(cfg.show_source);
+    }
+
+    #[test]
+    fn parse_cli_disasm_requires_path() {
+        let err = parse_cli_args(&[s("--disasm-vmbc")]).expect_err("parse should fail");
+        assert!(err.contains("missing value for --disasm-vmbc"));
+    }
+
+    #[test]
+    fn parse_cli_show_source_requires_disasm() {
+        let err = parse_cli_args(&[s("--show-source")]).expect_err("parse should fail");
+        assert!(err.contains("requires --disasm-vmbc"));
+    }
+
+    #[test]
+    fn parse_cli_disasm_rejects_source_path() {
+        let err = parse_cli_args(&[
+            s("--disasm-vmbc"),
+            s("program.vmbc"),
+            s("examples/example.rss"),
+        ])
+        .expect_err("parse should fail");
+        assert!(err.contains("does not accept a source path"));
+    }
+
+    #[test]
+    fn parse_cli_repl_flag() {
+        let cfg = parse_cli_args(&[s("--repl")]).expect("parse should succeed");
+        assert!(cfg.repl);
+    }
+
+    #[test]
+    fn parse_cli_repl_legacy_command() {
+        let cfg = parse_cli_args(&[s("repl")]).expect("parse should succeed");
+        assert!(cfg.repl);
+    }
+
+    #[test]
+    fn parse_cli_repl_rejects_source_path() {
+        let err = parse_cli_args(&[s("--repl"), s("examples/example.rss")])
+            .expect_err("parse should fail");
+        assert!(err.contains("does not accept a source path"));
+    }
+
+    #[test]
+    fn parse_cli_repl_rejects_emit_vmbc() {
+        let err = parse_cli_args(&[s("--repl"), s("--emit-vmbc"), s("out.vmbc")])
+            .expect_err("parse should fail");
+        assert!(err.contains("cannot be combined"));
+    }
+
+    #[test]
+    fn repl_compile_falls_back_to_expression_semicolon() {
+        let compiled = super::compile_repl_snippet("1 + 2").expect("compile should succeed");
+        assert_eq!(compiled.locals, 0);
     }
 }

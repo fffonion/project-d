@@ -1,6 +1,7 @@
 use vm::{
-    ArgInfo, BytecodeBuilder, DebugFunction, DebugInfo, HostImport, LineInfo, LocalInfo, Program,
-    ValidationError, Value, WireError, decode_program, encode_program, infer_local_count,
+    ArgInfo, Assembler, BytecodeBuilder, DebugFunction, DebugInfo, DisassembleOptions, HostImport,
+    LineInfo, LocalInfo, Program, ValidationError, Value, WireError, decode_program,
+    disassemble_vmbc, disassemble_vmbc_with_options, encode_program, infer_local_count,
     validate_program,
 };
 
@@ -155,4 +156,134 @@ fn infer_local_count_finds_highest_local_index() {
     let program = Program::new(vec![], bc.finish());
     let locals = infer_local_count(&program).expect("infer should succeed");
     assert_eq!(locals, 8);
+}
+
+#[test]
+fn disassemble_vmbc_outputs_readable_listing() {
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.call(0, 1);
+    bc.ret();
+    let program = Program::with_imports_and_debug(
+        vec![Value::String("x".to_string())],
+        bc.finish(),
+        vec![HostImport {
+            name: "print".to_string(),
+            arity: 1,
+        }],
+        None,
+    );
+    let bytes = encode_program(&program).expect("encode should succeed");
+
+    let listing = disassemble_vmbc(&bytes).expect("disassembly should succeed");
+
+    assert!(listing.contains("constants (1):"));
+    assert!(listing.contains("[0000] String(\"x\")"));
+    assert!(listing.contains("imports (1):"));
+    assert!(listing.contains("[0000] print/1"));
+    assert!(listing.contains("ldc 0 ; const[0]=String(\"x\")"));
+    assert!(listing.contains("call 0 1 ; import print/1"));
+    assert!(listing.contains("ret"));
+}
+
+#[test]
+fn disassemble_vmbc_can_include_embedded_source() {
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.stloc(0);
+    bc.ldloc(0);
+    bc.ret();
+    let program = Program::with_imports_and_debug(
+        vec![Value::Int(1)],
+        bc.finish(),
+        vec![],
+        Some(DebugInfo {
+            source: Some("let x = 1;\nx;".to_string()),
+            lines: vec![
+                LineInfo { offset: 0, line: 1 },
+                LineInfo { offset: 5, line: 1 },
+                LineInfo { offset: 7, line: 2 },
+            ],
+            functions: vec![],
+            locals: vec![],
+        }),
+    );
+    let bytes = encode_program(&program).expect("encode should succeed");
+
+    let listing = disassemble_vmbc_with_options(&bytes, DisassembleOptions { show_source: true })
+        .expect("disassembly should succeed");
+
+    let src1 = listing
+        .find("; src 0001  let x = 1;")
+        .expect("line 1 source marker");
+    let op1 = listing.find("0000\t02 00 00 00 00").expect("line 1 opcode");
+    let src2 = listing
+        .find("; src 0002  x;")
+        .expect("line 2 source marker");
+    let op2 = listing.find("0007\t0F 00").expect("line 2 opcode");
+    assert!(src1 < op1);
+    assert!(src2 < op2);
+}
+
+#[test]
+fn disassemble_vmbc_hides_source_without_flag() {
+    let mut bc = BytecodeBuilder::new();
+    bc.ret();
+    let program = Program::with_imports_and_debug(
+        vec![],
+        bc.finish(),
+        vec![],
+        Some(DebugInfo {
+            source: Some("let x = 1;\nx;".to_string()),
+            lines: vec![],
+            functions: vec![],
+            locals: vec![],
+        }),
+    );
+    let bytes = encode_program(&program).expect("encode should succeed");
+
+    let listing = disassemble_vmbc(&bytes).expect("disassembly should succeed");
+
+    assert!(!listing.contains("source:"));
+    assert!(!listing.contains("let x = 1;"));
+}
+
+#[test]
+fn assembler_deduplicates_equal_string_constants() {
+    let mut asm = Assembler::new();
+    let idx0 = asm.add_constant(Value::String("same".to_string()));
+    let idx1 = asm.add_constant(Value::String("same".to_string()));
+    assert_eq!(idx0, idx1);
+    asm.ldc(idx0);
+    asm.ldc(idx1);
+    asm.ret();
+
+    let program = asm.finish_program().expect("assembler should finish");
+    assert_eq!(program.constants, vec![Value::String("same".to_string())]);
+}
+
+#[test]
+fn assembler_deduplicates_equal_scalar_constants() {
+    let mut asm = Assembler::new();
+    let int0 = asm.add_constant(Value::Int(7));
+    let int1 = asm.add_constant(Value::Int(7));
+    let bool0 = asm.add_constant(Value::Bool(true));
+    let bool1 = asm.add_constant(Value::Bool(true));
+    let float0 = asm.add_constant(Value::Float(3.5));
+    let float1 = asm.add_constant(Value::Float(3.5));
+
+    assert_eq!(int0, int1);
+    assert_eq!(bool0, bool1);
+    assert_eq!(float0, float1);
+
+    asm.ldc(int0);
+    asm.ldc(bool0);
+    asm.ldc(float0);
+    asm.ret();
+
+    let program = asm.finish_program().expect("assembler should finish");
+    assert_eq!(
+        program.constants,
+        vec![Value::Int(7), Value::Bool(true), Value::Float(3.5)]
+    );
 }

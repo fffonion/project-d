@@ -1,4 +1,5 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write;
 
 use crate::builtins::BuiltinFunction;
 use crate::debug::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
@@ -270,6 +271,182 @@ pub fn infer_local_count(program: &Program) -> Result<usize, ValidationError> {
         Some(index) => index as usize + 1,
         None => 0,
     })
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DisassembleOptions {
+    pub show_source: bool,
+}
+
+pub fn disassemble_vmbc(bytes: &[u8]) -> Result<String, WireError> {
+    disassemble_vmbc_with_options(bytes, DisassembleOptions::default())
+}
+
+pub fn disassemble_vmbc_with_options(
+    bytes: &[u8],
+    options: DisassembleOptions,
+) -> Result<String, WireError> {
+    let program = decode_program(bytes)?;
+    Ok(disassemble_program_with_options(&program, options))
+}
+
+pub fn disassemble_program(program: &Program) -> String {
+    disassemble_program_with_options(program, DisassembleOptions::default())
+}
+
+pub fn disassemble_program_with_options(program: &Program, options: DisassembleOptions) -> String {
+    let mut out = String::new();
+    let _ = writeln!(&mut out, "constants ({}):", program.constants.len());
+    for (index, constant) in program.constants.iter().enumerate() {
+        let _ = writeln!(&mut out, "  [{index:04}] {constant:?}");
+    }
+
+    let _ = writeln!(&mut out, "imports ({}):", program.imports.len());
+    for (index, import) in program.imports.iter().enumerate() {
+        let _ = writeln!(&mut out, "  [{index:04}] {}/{}", import.name, import.arity);
+    }
+    let _ = writeln!(&mut out, "code ({} bytes):", program.code.len());
+    let mut source_annotations = source_annotations(program, options.show_source);
+    if options.show_source && source_annotations.is_none() {
+        let _ = writeln!(&mut out, "      ; source: <none>");
+    }
+    let code = &program.code;
+    let mut ip = 0usize;
+    while ip < code.len() {
+        let start = ip;
+        if let Some(lines_at_offset) = source_annotations
+            .as_mut()
+            .and_then(|annotations| annotations.remove(&start))
+        {
+            for (line, text) in lines_at_offset {
+                let _ = writeln!(&mut out, "      ; src {line:04}  {text}");
+            }
+        }
+        let opcode = code[ip];
+        ip += 1;
+
+        let mut instruction = String::new();
+        let mut truncated = false;
+        match opcode {
+            x if x == OpCode::Nop as u8 => instruction.push_str("nop"),
+            x if x == OpCode::Ret as u8 => instruction.push_str("ret"),
+            x if x == OpCode::Ldc as u8 => {
+                if let Some(index) = read_u32(code, &mut ip) {
+                    instruction.push_str(&format!("ldc {index}"));
+                    if let Some(value) = program.constants.get(index as usize) {
+                        instruction.push_str(&format!(" ; const[{index}]={value:?}"));
+                    }
+                } else {
+                    instruction.push_str("ldc <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Add as u8 => instruction.push_str("add"),
+            x if x == OpCode::Sub as u8 => instruction.push_str("sub"),
+            x if x == OpCode::Mul as u8 => instruction.push_str("mul"),
+            x if x == OpCode::Div as u8 => instruction.push_str("div"),
+            x if x == OpCode::Neg as u8 => instruction.push_str("neg"),
+            x if x == OpCode::Ceq as u8 => instruction.push_str("ceq"),
+            x if x == OpCode::Clt as u8 => instruction.push_str("clt"),
+            x if x == OpCode::Cgt as u8 => instruction.push_str("cgt"),
+            x if x == OpCode::Br as u8 => {
+                if let Some(target) = read_u32(code, &mut ip) {
+                    instruction.push_str(&format!("br {target}"));
+                } else {
+                    instruction.push_str("br <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Brfalse as u8 => {
+                if let Some(target) = read_u32(code, &mut ip) {
+                    instruction.push_str(&format!("brfalse {target}"));
+                } else {
+                    instruction.push_str("brfalse <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Pop as u8 => instruction.push_str("pop"),
+            x if x == OpCode::Dup as u8 => instruction.push_str("dup"),
+            x if x == OpCode::Ldloc as u8 => {
+                if let Some(index) = read_u8(code, &mut ip) {
+                    instruction.push_str(&format!("ldloc {index}"));
+                } else {
+                    instruction.push_str("ldloc <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Stloc as u8 => {
+                if let Some(index) = read_u8(code, &mut ip) {
+                    instruction.push_str(&format!("stloc {index}"));
+                } else {
+                    instruction.push_str("stloc <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Call as u8 => {
+                if let Some(index) = read_u16(code, &mut ip) {
+                    if let Some(argc) = read_u8(code, &mut ip) {
+                        instruction.push_str(&format!("call {index} {argc}"));
+                        if let Some(comment) = format_call_target(program, index, argc) {
+                            instruction.push_str(&format!(" ; {comment}"));
+                        }
+                    } else {
+                        instruction.push_str("call <truncated>");
+                        truncated = true;
+                    }
+                } else {
+                    instruction.push_str("call <truncated>");
+                    truncated = true;
+                }
+            }
+            x if x == OpCode::Shl as u8 => instruction.push_str("shl"),
+            x if x == OpCode::Shr as u8 => instruction.push_str("shr"),
+            other => instruction.push_str(&format!(".byte 0x{other:02X} ; invalid opcode")),
+        }
+
+        let encoded = format_hex_bytes(&code[start..ip]);
+        let _ = writeln!(&mut out, "{start:04}\t{encoded:<14}\t{instruction}");
+        if truncated {
+            break;
+        }
+    }
+
+    out
+}
+
+fn source_annotations(
+    program: &Program,
+    show_source: bool,
+) -> Option<BTreeMap<usize, Vec<(u32, String)>>> {
+    if !show_source {
+        return None;
+    }
+    let debug = program.debug.as_ref()?;
+    let source = debug.source.as_ref()?;
+    let source_lines = source.lines().collect::<Vec<_>>();
+    let mut first_offset_by_line = HashMap::<u32, u32>::new();
+    for info in &debug.lines {
+        first_offset_by_line.entry(info.line).or_insert(info.offset);
+    }
+    let mut pairs = first_offset_by_line
+        .into_iter()
+        .map(|(line, offset)| (offset, line))
+        .collect::<Vec<_>>();
+    pairs.sort_by_key(|(offset, line)| (*offset, *line));
+
+    let mut annotations = BTreeMap::<usize, Vec<(u32, String)>>::new();
+    for (offset, line) in pairs {
+        let text = source_lines
+            .get(line.saturating_sub(1) as usize)
+            .copied()
+            .unwrap_or("<missing source line>")
+            .to_string();
+        annotations
+            .entry(offset as usize)
+            .or_default()
+            .push((line, text));
+    }
+    Some(annotations)
 }
 
 struct ProgramAnalysis {
@@ -611,4 +788,25 @@ fn read_u32(code: &[u8], ip: &mut usize) -> Option<u32> {
     let bytes = code.get(*ip..(*ip + 4))?;
     *ip += 4;
     Some(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+fn format_hex_bytes(bytes: &[u8]) -> String {
+    let mut out = String::new();
+    for (idx, byte) in bytes.iter().enumerate() {
+        if idx > 0 {
+            out.push(' ');
+        }
+        out.push_str(&format!("{byte:02X}"));
+    }
+    out
+}
+
+fn format_call_target(program: &Program, index: u16, argc: u8) -> Option<String> {
+    if let Some(builtin) = BuiltinFunction::from_call_index(index) {
+        return Some(format!("builtin {}/{}", builtin.name(), builtin.arity()));
+    }
+    program
+        .imports
+        .get(index as usize)
+        .map(|import| format!("import {}/{} (argc={argc})", import.name, import.arity))
 }

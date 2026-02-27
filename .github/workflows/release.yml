@@ -6,7 +6,7 @@ on:
       - "*"
 
 jobs:
-  build-pd-proxy:
+  build-binaries:
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -20,18 +20,32 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      - name: Build pd-proxy
-        run: cargo build -p pd-proxy --release --locked
+      - name: Build pd-proxy and pd-vm-run
+        run: |
+          cargo build -p pd-proxy --release --locked
+          cargo build -p pd-vm --bin pd-vm-run --release --locked
 
-      - name: Package binary
+      - name: Package binaries
         shell: bash
         run: |
           mkdir -p dist
           cp target/release/pd-proxy dist/pd-proxy
+          cp target/release/pd-vm-run dist/pd-vm-run
           tar -czf dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-proxy
+          tar -czf dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz -C dist pd-vm-run
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries-${{ github.ref_name }}-linux-x86_64
+          path: |
+            dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz
 
       - name: Publish release asset
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
-          files: dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz
+          files: |
+            dist/pd-proxy-${{ github.ref_name }}-linux-x86_64.tar.gz
+            dist/pd-vm-run-${{ github.ref_name }}-linux-x86_64.tar.gz

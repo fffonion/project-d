@@ -162,11 +162,38 @@ cargo run -p pd-vm --bin pd-vm-run -- examples/example.rss
 cargo run -p pd-vm --bin pd-vm-run -- examples/example.scm
 ```
 
+Interactive REPL (RustScript snippets, with up/down history):
+
+```powershell
+cargo run -p pd-vm --bin pd-vm-run -- --repl
+```
+
 JIT visibility (dump compiled traces + NYI reasons):
 
 ```powershell
 cargo run -p pd-vm --bin pd-vm-run -- --jit-hot-loop 2 --jit-dump examples/example.rss
 ```
+
+Emit VMBC wire-format bytecode without running:
+
+```powershell
+cargo run -p pd-vm --bin pd-vm-run -- --emit-vmbc out/example.vmbc examples/example.rss
+```
+
+Disassemble VMBC wire-format binaries:
+
+```powershell
+cargo run -p pd-vm --bin pd-vm-run -- --disasm-vmbc path/to/program.vmbc
+```
+
+Include embedded source from debug info (if present):
+
+```powershell
+cargo run -p pd-vm --bin pd-vm-run -- --disasm-vmbc path/to/program.vmbc --show-source
+```
+
+The listing uses tab-separated columns for `offset`, `opcode`, and `assembly`.
+When `--show-source` is enabled, source is shown on separate `; src ...` lines before the first opcode for that line.
 
 Library API visibility hooks:
 - `vm.set_jit_config(...)`

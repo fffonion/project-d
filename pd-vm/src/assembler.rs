@@ -21,6 +21,10 @@ struct Fixup {
 pub struct Assembler {
     code: Vec<u8>,
     constants: Vec<Value>,
+    int_constants: HashMap<i64, u32>,
+    float_constants: HashMap<u64, u32>,
+    bool_constants: HashMap<bool, u32>,
+    string_constants: HashMap<String, u32>,
     labels: HashMap<String, u32>,
     fixups: Vec<Fixup>,
     debug: DebugInfoBuilder,
@@ -37,6 +41,10 @@ impl Assembler {
         Self {
             code: Vec::new(),
             constants: Vec::new(),
+            int_constants: HashMap::new(),
+            float_constants: HashMap::new(),
+            bool_constants: HashMap::new(),
+            string_constants: HashMap::new(),
             labels: HashMap::new(),
             fixups: Vec::new(),
             debug: DebugInfoBuilder::new(),
@@ -74,9 +82,50 @@ impl Assembler {
     }
 
     pub fn add_constant(&mut self, value: Value) -> u32 {
-        let index = self.constants.len() as u32;
-        self.constants.push(value);
-        index
+        match value {
+            Value::Int(number) => {
+                if let Some(index) = self.int_constants.get(&number).copied() {
+                    return index;
+                }
+                let index = self.constants.len() as u32;
+                self.constants.push(Value::Int(number));
+                self.int_constants.insert(number, index);
+                index
+            }
+            Value::Float(number) => {
+                let bits = number.to_bits();
+                if let Some(index) = self.float_constants.get(&bits).copied() {
+                    return index;
+                }
+                let index = self.constants.len() as u32;
+                self.constants.push(Value::Float(number));
+                self.float_constants.insert(bits, index);
+                index
+            }
+            Value::Bool(flag) => {
+                if let Some(index) = self.bool_constants.get(&flag).copied() {
+                    return index;
+                }
+                let index = self.constants.len() as u32;
+                self.constants.push(Value::Bool(flag));
+                self.bool_constants.insert(flag, index);
+                index
+            }
+            Value::String(text) => {
+                if let Some(index) = self.string_constants.get(&text).copied() {
+                    return index;
+                }
+                let index = self.constants.len() as u32;
+                self.constants.push(Value::String(text.clone()));
+                self.string_constants.insert(text, index);
+                index
+            }
+            other => {
+                let index = self.constants.len() as u32;
+                self.constants.push(other);
+                index
+            }
+        }
     }
 
     pub fn push_const(&mut self, value: Value) -> u32 {
