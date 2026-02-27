@@ -1,39 +1,14 @@
 import { add_one } from "pd-vm-host";
 
-// Example: all core syntax in JavaScript flavor
-let sum = 0;
-let limit = 5;
-
-for (let i = 0; i < limit; i = i + 1) {
-    if (i == 1) {
-        continue;
-    }
-    if (i > 2) {
-        break;
-    }
-    sum = sum + i;
+let i = 0;
+let total = 0;
+while (i < 3) {
+    total = total + 1;
+    i = i + 1;
 }
 
-let j = 0;
-while (j < 4) {
-    j = j + 1;
-    if (j == 2) {
-        continue;
-    }
-    sum = sum + 1;
-    if (j > 2) {
-        break;
-    }
-}
-
-let bump = 1;
-let adjust = (value) => value + bump;
-bump = 100;
-
-if (sum > 0) {
-    sum = adjust(sum);
+if (total > 2) {
+    console.log(add_one(5));
 } else {
-    sum = 0;
+    console.log(0);
 }
-
-console.log(add_one(sum));

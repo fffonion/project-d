@@ -1,0 +1,63 @@
+import { equals, len, contains, split, trim, replace } from "../rss/strings.rss";
+import { array_len, array_get } from "../rss/arrays.rss";
+
+let ok = true;
+
+if len("hello") == 5 {
+} else {
+    ok = false;
+}
+
+if contains("hello", "ell") {
+} else {
+    ok = false;
+}
+
+if contains("hello", "zzz") {
+    ok = false;
+} else {
+}
+
+if equals(trim("  rustscript\n"), "rustscript") {
+} else {
+    ok = false;
+}
+
+if equals(replace("go gopher go", "go", "rs"), "rs rspher rs") {
+} else {
+    ok = false;
+}
+
+let parts = split("a,b,c", ",");
+if array_len(parts) == 3 {
+} else {
+    ok = false;
+}
+
+if equals(array_get(parts, 0), "a") {
+} else {
+    ok = false;
+}
+
+if equals(array_get(parts, 2), "c") {
+} else {
+    ok = false;
+}
+
+let chars = split("ab", "");
+if array_len(chars) == 2 {
+} else {
+    ok = false;
+}
+
+if equals(array_get(chars, 0), "a") {
+} else {
+    ok = false;
+}
+
+if equals(array_get(chars, 1), "b") {
+} else {
+    ok = false;
+}
+
+ok;

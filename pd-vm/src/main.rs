@@ -268,6 +268,22 @@ fn format_value(value: &Value) -> String {
         Value::Float(value) => value.to_string(),
         Value::Bool(value) => value.to_string(),
         Value::String(value) => value.clone(),
+        Value::Array(values) => {
+            let parts = values
+                .iter()
+                .map(format_value)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("[{parts}]")
+        }
+        Value::Map(entries) => {
+            let parts = entries
+                .iter()
+                .map(|(key, value)| format!("{}: {}", format_value(key), format_value(value)))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("{{{parts}}}")
+        }
     }
 }
 

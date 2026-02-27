@@ -1,4 +1,5 @@
-use super::super::{ParseError, STDLIB_PRINT_NAME, is_ident_continue, is_ident_start};
+use super::super::{ParseError, STDLIB_PRINT_NAME};
+use super::{is_ident_continue, is_ident_start};
 
 pub(super) fn lower(source: &str) -> Result<String, ParseError> {
     let console_rewritten = rewrite_console_log_calls(source);

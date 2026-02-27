@@ -1,0 +1,33 @@
+// IO helpers inspired by Lua's io library surface.
+
+pub fn open(path, mode) {
+    io_open(path, mode);
+}
+
+pub fn popen(command, mode) {
+    io_popen(command, mode);
+}
+
+pub fn read_all(handle) {
+    io_read_all(handle);
+}
+
+pub fn read_line(handle) {
+    io_read_line(handle);
+}
+
+pub fn write(handle, data) {
+    io_write(handle, data);
+}
+
+pub fn flush(handle) {
+    io_flush(handle);
+}
+
+pub fn close(handle) {
+    io_close(handle);
+}
+
+pub fn exists(path) {
+    io_exists(path);
+}

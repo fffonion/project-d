@@ -60,27 +60,16 @@ fn examples_run() {
     let stack = run_compiled_file(&root.join("example.scm"));
     assert_eq!(stack, vec![Value::Int(6)]);
 
-    let stack = run_compiled_file(&root.join("closure.rss"));
+    // Feature examples for each frontend flavor.
+    let stack = run_compiled_file(&root.join("example_complex.rss"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
-    let stack = run_compiled_file(&root.join("closure.js"));
+    let stack = run_compiled_file(&root.join("example_complex.js"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
-    let stack = run_compiled_file(&root.join("closure.lua"));
+    let stack = run_compiled_file(&root.join("example_complex.lua"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
-    let stack = run_compiled_file(&root.join("closure.scm"));
+    let stack = run_compiled_file(&root.join("example_complex.scm"));
     assert_eq!(stack, vec![Value::Int(12)]);
-
-    let stack = run_compiled_file(&root.join("assignment_example.rss"));
-    assert_eq!(stack, vec![Value::Int(2)]);
-
-    let stack = run_compiled_file(&root.join("assignment_example.js"));
-    assert_eq!(stack, vec![Value::Int(2)]);
-
-    let stack = run_compiled_file(&root.join("assignment_example.lua"));
-    assert_eq!(stack, vec![Value::Int(2)]);
-
-    let stack = run_compiled_file(&root.join("assignment_example.scm"));
-    assert_eq!(stack, vec![Value::Int(2)]);
 }

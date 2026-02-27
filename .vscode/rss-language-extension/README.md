@@ -1,6 +1,6 @@
-# PD RSS Syntax Extension
+# RustScript Syntax Extension
 
-Local VS Code extension for syntax highlighting of Project D `.rss` files.
+Local VS Code extension for syntax highlighting of RustScript `.rss` files.
 
 ## Install locally
 

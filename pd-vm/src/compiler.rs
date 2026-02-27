@@ -1,7 +1,8 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::assembler::{Assembler, AssemblerError};
+use crate::builtins::BuiltinFunction;
 use crate::vm::{HostImport, Program, Value, Vm};
 
 #[derive(Debug)]
@@ -11,6 +12,7 @@ pub enum CompileError {
     ClosureUsedAsValue,
     BreakOutsideLoop,
     ContinueOutsideLoop,
+    InlineFunctionRecursion(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,6 +51,14 @@ pub enum SourcePathError {
     Io(std::io::Error),
     MissingExtension,
     UnsupportedExtension(String),
+    ImportCycle(PathBuf),
+    NonRustScriptModule(PathBuf),
+    ImportWithoutParent(PathBuf),
+    InvalidImportSyntax {
+        path: PathBuf,
+        line: usize,
+        message: String,
+    },
     Source(SourceError),
 }
 
@@ -60,6 +70,28 @@ impl std::fmt::Display for SourcePathError {
             SourcePathError::UnsupportedExtension(ext) => write!(
                 f,
                 "unsupported source extension '.{ext}', expected .rss, .js, .lua, or .scm"
+            ),
+            SourcePathError::ImportCycle(path) => {
+                write!(f, "import cycle detected at '{}'", path.display())
+            }
+            SourcePathError::NonRustScriptModule(path) => {
+                write!(f, "module '{}' must use .rss extension", path.display())
+            }
+            SourcePathError::ImportWithoutParent(path) => write!(
+                f,
+                "cannot resolve import from '{}': missing parent directory",
+                path.display()
+            ),
+            SourcePathError::InvalidImportSyntax {
+                path,
+                line,
+                message,
+            } => write!(
+                f,
+                "invalid import syntax in '{}' at line {}: {}",
+                path.display(),
+                line,
+                message
             ),
             SourcePathError::Source(err) => write!(f, "{err}"),
         }
@@ -82,7 +114,7 @@ impl From<SourceError> for SourcePathError {
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SourceFlavor {
-    Rss,
+    RustScript,
     JavaScript,
     Lua,
     Scheme,
@@ -91,7 +123,7 @@ pub enum SourceFlavor {
 impl SourceFlavor {
     pub fn from_extension(ext: &str) -> Option<Self> {
         match ext.to_ascii_lowercase().as_str() {
-            "rss" => Some(Self::Rss),
+            "rss" => Some(Self::RustScript),
             "js" => Some(Self::JavaScript),
             "lua" => Some(Self::Lua),
             "scm" => Some(Self::Scheme),
@@ -113,6 +145,11 @@ const STDLIB_PRINT_NAME: &str = "print";
 const STDLIB_PRINT_ARITY: u8 = 1;
 
 mod frontends;
+mod linker;
+mod parser;
+mod source_loader;
+
+use linker::{MergedFrontendOutput, merge_units};
 
 #[derive(Clone, Debug)]
 pub struct ClosureExpr {
@@ -160,6 +197,7 @@ pub enum Stmt {
         name: String,
         arity: u8,
         args: Vec<String>,
+        exported: bool,
         line: u32,
     },
     Expr {
@@ -198,6 +236,14 @@ pub struct FunctionDecl {
     pub arity: u8,
     pub index: u16,
     pub args: Vec<String>,
+    pub exported: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct FunctionImpl {
+    pub param_slots: Vec<u8>,
+    pub body_stmts: Vec<Stmt>,
+    pub body_expr: Expr,
 }
 
 pub struct CompiledProgram {
@@ -212,1134 +258,52 @@ impl CompiledProgram {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-enum TokenKind {
-    Ident(String),
-    Int(i64),
-    String(String),
-    True,
-    False,
-    Fn,
-    Let,
-    For,
-    If,
-    Else,
-    While,
-    Break,
-    Continue,
-    Plus,
-    Minus,
-    Star,
-    Slash,
-    Pipe,
-    LParen,
-    RParen,
-    LBrace,
-    RBrace,
-    Comma,
-    Semicolon,
-    Equal,
-    EqualEqual,
-    Less,
-    Greater,
-    Eof,
-}
+fn compile_parsed_output(parsed: MergedFrontendOutput) -> Result<CompiledProgram, SourceError> {
+    let MergedFrontendOutput {
+        source,
+        stmts,
+        locals,
+        local_bindings,
+        functions,
+        function_impls,
+    } = parsed;
 
-#[derive(Debug, Clone, PartialEq)]
-struct Token {
-    kind: TokenKind,
-    line: usize,
-}
-
-struct Lexer<'a> {
-    chars: std::str::Chars<'a>,
-    current: Option<char>,
-    line: usize,
-}
-
-impl<'a> Lexer<'a> {
-    fn new(source: &'a str) -> Self {
-        let mut chars = source.chars();
-        let current = chars.next();
-        Self {
-            chars,
-            current,
-            line: 1,
-        }
-    }
-
-    fn next_token(&mut self) -> Result<Token, ParseError> {
-        self.skip_whitespace_and_comments()?;
-        let line = self.line;
-        let Some(ch) = self.current else {
-            return Ok(Token {
-                kind: TokenKind::Eof,
-                line,
-            });
-        };
-
-        let token = match ch {
-            '+' => {
-                self.advance();
-                TokenKind::Plus
-            }
-            '-' => {
-                self.advance();
-                TokenKind::Minus
-            }
-            '*' => {
-                self.advance();
-                TokenKind::Star
-            }
-            '/' => {
-                self.advance();
-                TokenKind::Slash
-            }
-            '|' => {
-                self.advance();
-                TokenKind::Pipe
-            }
-            '(' => {
-                self.advance();
-                TokenKind::LParen
-            }
-            ')' => {
-                self.advance();
-                TokenKind::RParen
-            }
-            '{' => {
-                self.advance();
-                TokenKind::LBrace
-            }
-            '}' => {
-                self.advance();
-                TokenKind::RBrace
-            }
-            ',' => {
-                self.advance();
-                TokenKind::Comma
-            }
-            ';' => {
-                self.advance();
-                TokenKind::Semicolon
-            }
-            '<' => {
-                self.advance();
-                TokenKind::Less
-            }
-            '>' => {
-                self.advance();
-                TokenKind::Greater
-            }
-            '=' => {
-                self.advance();
-                if self.current == Some('=') {
-                    self.advance();
-                    TokenKind::EqualEqual
-                } else {
-                    TokenKind::Equal
-                }
-            }
-            '"' => {
-                let value = self.consume_string()?;
-                TokenKind::String(value)
-            }
-            c if c.is_ascii_digit() => {
-                let value = self.consume_number()?;
-                TokenKind::Int(value)
-            }
-            c if is_ident_start(c) => {
-                let ident = self.consume_ident();
-                match ident.as_str() {
-                    "fn" => TokenKind::Fn,
-                    "let" => TokenKind::Let,
-                    "for" => TokenKind::For,
-                    "if" => TokenKind::If,
-                    "else" => TokenKind::Else,
-                    "while" => TokenKind::While,
-                    "break" => TokenKind::Break,
-                    "continue" => TokenKind::Continue,
-                    "true" => TokenKind::True,
-                    "false" => TokenKind::False,
-                    _ => TokenKind::Ident(ident),
-                }
-            }
-            other => {
-                return Err(ParseError {
-                    line,
-                    message: format!("unexpected character '{other}'"),
-                });
-            }
-        };
-
-        Ok(Token { kind: token, line })
-    }
-
-    fn advance(&mut self) {
-        if self.current == Some('\n') {
-            self.line += 1;
-        }
-        self.current = self.chars.next();
-    }
-
-    fn skip_whitespace_and_comments(&mut self) -> Result<(), ParseError> {
-        loop {
-            while matches!(self.current, Some(c) if c.is_whitespace()) {
-                self.advance();
-            }
-
-            let mut peek = self.chars.clone();
-            if self.current == Some('/') && peek.next() == Some('/') {
-                while let Some(ch) = self.current {
-                    self.advance();
-                    if ch == '\n' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            let mut peek = self.chars.clone();
-            if self.current == Some('/') && peek.next() == Some('*') {
-                let start_line = self.line;
-                self.advance();
-                self.advance();
-                loop {
-                    let Some(ch) = self.current else {
-                        return Err(ParseError {
-                            line: start_line,
-                            message: "unterminated block comment".to_string(),
-                        });
-                    };
-                    if ch == '*' {
-                        let mut close = self.chars.clone();
-                        if close.next() == Some('/') {
-                            self.advance();
-                            self.advance();
-                            break;
-                        }
-                    }
-                    self.advance();
-                }
-                continue;
-            }
-            break;
-        }
-        Ok(())
-    }
-
-    fn consume_number(&mut self) -> Result<i64, ParseError> {
-        let line = self.line;
-        let mut text = String::new();
-        while let Some(ch) = self.current {
-            if ch.is_ascii_digit() {
-                text.push(ch);
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        text.parse::<i64>().map_err(|_| ParseError {
-            line,
-            message: format!("invalid number '{text}'"),
-        })
-    }
-
-    fn consume_string(&mut self) -> Result<String, ParseError> {
-        let line = self.line;
-        if self.current != Some('"') {
-            return Err(ParseError {
-                line,
-                message: "string literal must start with '\"'".to_string(),
-            });
-        }
-        self.advance();
-
-        let mut out = String::new();
-        loop {
-            let Some(ch) = self.current else {
-                return Err(ParseError {
-                    line,
-                    message: "unterminated string literal".to_string(),
-                });
-            };
-
-            match ch {
-                '"' => {
-                    self.advance();
-                    break;
-                }
-                '\\' => {
-                    self.advance();
-                    let Some(escaped) = self.current else {
-                        return Err(ParseError {
-                            line,
-                            message: "unterminated string escape".to_string(),
-                        });
-                    };
-                    let mapped = match escaped {
-                        'n' => '\n',
-                        'r' => '\r',
-                        't' => '\t',
-                        '\\' => '\\',
-                        '"' => '"',
-                        '0' => '\0',
-                        other => {
-                            return Err(ParseError {
-                                line,
-                                message: format!("invalid escape '\\{other}'"),
-                            });
-                        }
-                    };
-                    out.push(mapped);
-                    self.advance();
-                }
-                other => {
-                    out.push(other);
-                    self.advance();
-                }
-            }
-        }
-
-        Ok(out)
-    }
-
-    fn consume_ident(&mut self) -> String {
-        let mut text = String::new();
-        while let Some(ch) = self.current {
-            if is_ident_continue(ch) {
-                text.push(ch);
-                self.advance();
-            } else {
-                break;
-            }
-        }
-        text
-    }
-}
-
-fn is_ident_start(ch: char) -> bool {
-    ch.is_ascii_alphabetic() || ch == '_'
-}
-
-fn is_ident_continue(ch: char) -> bool {
-    ch.is_ascii_alphanumeric() || ch == '_'
-}
-
-struct Parser {
-    tokens: Vec<Token>,
-    pos: usize,
-    locals: HashMap<String, u8>,
-    next_local: u8,
-    functions: HashMap<String, FunctionDecl>,
-    function_list: Vec<FunctionDecl>,
-    next_function: u16,
-    closure_bindings: HashMap<String, ClosureExpr>,
-    closure_scopes: Vec<HashMap<String, u8>>,
-    closure_capture_contexts: Vec<ClosureCaptureContext>,
-    allow_implicit_externs: bool,
-    loop_depth: usize,
-}
-
-struct ClosureCaptureContext {
-    by_name: HashMap<String, u8>,
-    capture_copies: Vec<(u8, u8)>,
-}
-
-impl Parser {
-    fn new(source: &str, allow_implicit_externs: bool) -> Result<Self, ParseError> {
-        let mut lexer = Lexer::new(source);
-        let mut tokens = Vec::new();
-        loop {
-            let token = lexer.next_token()?;
-            let is_eof = matches!(token.kind, TokenKind::Eof);
-            tokens.push(token);
-            if is_eof {
-                break;
-            }
-        }
-        Ok(Self {
-            tokens,
-            pos: 0,
-            locals: HashMap::new(),
-            next_local: 0,
-            functions: HashMap::new(),
-            function_list: Vec::new(),
-            next_function: 0,
-            closure_bindings: HashMap::new(),
-            closure_scopes: Vec::new(),
-            closure_capture_contexts: Vec::new(),
-            allow_implicit_externs,
-            loop_depth: 0,
-        })
-    }
-
-    fn parse_program(&mut self) -> Result<Vec<Stmt>, ParseError> {
-        let mut stmts = Vec::new();
-        while !self.check(&TokenKind::Eof) {
-            stmts.push(self.parse_stmt()?);
-        }
-        Ok(stmts)
-    }
-
-    fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
-        if self.match_kind(&TokenKind::Fn) {
-            return self.parse_fn_decl();
-        }
-        if self.match_kind(&TokenKind::Let) {
-            return self.parse_let_with_terminator(true);
-        }
-        if self.match_kind(&TokenKind::For) {
-            return self.parse_for();
-        }
-        if self.match_kind(&TokenKind::If) {
-            return self.parse_if();
-        }
-        if self.match_kind(&TokenKind::While) {
-            return self.parse_while();
-        }
-        if self.match_kind(&TokenKind::Break) {
-            return self.parse_loop_control_stmt(true);
-        }
-        if self.match_kind(&TokenKind::Continue) {
-            return self.parse_loop_control_stmt(false);
-        }
-        if self.check_assignment_start() {
-            return self.parse_assign_with_terminator(true);
-        }
-
-        let line = self.current_line_u32();
-        let expr = self.parse_expr()?;
-        self.expect(&TokenKind::Semicolon, "expected ';' after expression")?;
-        Ok(Stmt::Expr { expr, line })
-    }
-
-    fn parse_loop_control_stmt(&mut self, is_break: bool) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        if self.loop_depth == 0 {
-            return Err(ParseError {
-                line: line as usize,
-                message: if is_break {
-                    "'break' is only allowed inside loops".to_string()
-                } else {
-                    "'continue' is only allowed inside loops".to_string()
-                },
-            });
-        }
-        self.expect(
-            &TokenKind::Semicolon,
-            if is_break {
-                "expected ';' after break"
-            } else {
-                "expected ';' after continue"
-            },
-        )?;
-        Ok(if is_break {
-            Stmt::Break { line }
-        } else {
-            Stmt::Continue { line }
-        })
-    }
-
-    fn parse_fn_decl(&mut self) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        let name = self.expect_ident("expected function name after 'fn'")?;
-        self.expect(&TokenKind::LParen, "expected '(' after function name")?;
-        let mut params = Vec::new();
-        if !self.check(&TokenKind::RParen) {
-            loop {
-                let param = self.expect_ident("expected parameter name")?;
-                params.push(param);
-                if self.match_kind(&TokenKind::Comma) {
-                    continue;
-                }
-                break;
-            }
-        }
-        self.expect(&TokenKind::RParen, "expected ')' after parameters")?;
-        self.expect(
-            &TokenKind::Semicolon,
-            "expected ';' after function declaration",
-        )?;
-
-        let arity = u8::try_from(params.len()).map_err(|_| ParseError {
-            line: self.current_line(),
-            message: "function arity too large".to_string(),
-        })?;
-        if self.functions.contains_key(&name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!("duplicate function '{name}'"),
-            });
-        }
-        if self.locals.contains_key(&name) || self.closure_bindings.contains_key(&name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!("name '{name}' already used by a local binding"),
-            });
-        }
-        let index = self.next_function;
-        self.next_function = self.next_function.checked_add(1).ok_or(ParseError {
-            line: self.current_line(),
-            message: "function index overflow".to_string(),
-        })?;
-        let decl = FunctionDecl {
-            name: name.clone(),
-            arity,
-            index,
-            args: params.clone(),
-        };
-        self.functions.insert(name.clone(), decl.clone());
-        self.function_list.push(decl.clone());
-        Ok(Stmt::FuncDecl {
-            name,
-            arity,
-            args: params,
-            line,
-        })
-    }
-
-    fn parse_let_with_terminator(&mut self, expect_terminator: bool) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        let name = self.expect_ident("expected identifier after 'let'")?;
-        self.expect(&TokenKind::Equal, "expected '=' after identifier")?;
-        let expr = self.parse_expr()?;
-        if expect_terminator {
-            self.expect(&TokenKind::Semicolon, "expected ';' after let")?;
-        }
-
-        if let Expr::Closure(closure) = expr {
-            if self.locals.contains_key(&name)
-                || self.functions.contains_key(&name)
-                || self.closure_bindings.contains_key(&name)
-            {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: format!("name '{name}' already used"),
-                });
-            }
-            self.closure_bindings.insert(name, closure.clone());
-            return Ok(Stmt::ClosureLet { line, closure });
-        }
-
-        if self.closure_bindings.contains_key(&name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!(
-                    "cannot rebind closure '{name}' as a value variable in this compiler subset"
-                ),
-            });
-        }
-
-        let index = self.get_or_assign_local(&name)?;
-        Ok(Stmt::Let { index, expr, line })
-    }
-
-    fn parse_assign_with_terminator(
-        &mut self,
-        expect_terminator: bool,
-    ) -> Result<Stmt, ParseError> {
-        let line = self.current_line_u32();
-        let name = self.expect_ident("expected identifier before '='")?;
-        self.expect(&TokenKind::Equal, "expected '=' after identifier")?;
-        let expr = self.parse_expr()?;
-        if expect_terminator {
-            self.expect(&TokenKind::Semicolon, "expected ';' after assignment")?;
-        }
-
-        if self.closure_bindings.contains_key(&name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!("cannot assign to closure '{name}'"),
-            });
-        }
-
-        let index = self.get_local(&name)?;
-        Ok(Stmt::Assign { index, expr, line })
-    }
-
-    fn parse_for(&mut self) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        self.expect(&TokenKind::LParen, "expected '(' after 'for'")?;
-
-        let init = if self.match_kind(&TokenKind::Let) {
-            self.parse_let_with_terminator(false)?
-        } else if self.check_assignment_start() {
-            self.parse_assign_with_terminator(false)?
-        } else {
-            let init_line = self.current_line_u32();
-            let expr = self.parse_expr()?;
-            Stmt::Expr {
-                expr,
-                line: init_line,
-            }
-        };
-        self.expect(&TokenKind::Semicolon, "expected ';' after for initializer")?;
-
-        let condition = self.parse_expr()?;
-        self.expect(&TokenKind::Semicolon, "expected ';' after for condition")?;
-
-        let post = if self.check_assignment_start() {
-            self.parse_assign_with_terminator(false)?
-        } else {
-            let post_line = self.current_line_u32();
-            let expr = self.parse_expr()?;
-            Stmt::Expr {
-                expr,
-                line: post_line,
-            }
-        };
-        self.expect(&TokenKind::RParen, "expected ')' after for clauses")?;
-        self.loop_depth += 1;
-        let body = self.parse_block("expected '{' after for clauses")?;
-        self.loop_depth -= 1;
-        Ok(Stmt::For {
-            init: Box::new(init),
-            condition,
-            post: Box::new(post),
-            body,
-            line,
-        })
-    }
-
-    fn parse_if(&mut self) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        let condition = self.parse_expr()?;
-        let then_branch = self.parse_block("expected '{' after if condition")?;
-        let else_branch = if self.match_kind(&TokenKind::Else) {
-            self.parse_block("expected '{' after else")?
-        } else {
-            Vec::new()
-        };
-        Ok(Stmt::IfElse {
-            condition,
-            then_branch,
-            else_branch,
-            line,
-        })
-    }
-
-    fn parse_while(&mut self) -> Result<Stmt, ParseError> {
-        let line = self.last_line();
-        let condition = self.parse_expr()?;
-        self.loop_depth += 1;
-        let body = self.parse_block("expected '{' after while condition")?;
-        self.loop_depth -= 1;
-        Ok(Stmt::While {
-            condition,
-            body,
-            line,
-        })
-    }
-
-    fn parse_block(&mut self, message: &str) -> Result<Vec<Stmt>, ParseError> {
-        self.expect(&TokenKind::LBrace, message)?;
-        let mut stmts = Vec::new();
-        while !self.check(&TokenKind::RBrace) {
-            if self.check(&TokenKind::Eof) {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: "unexpected end of input in block".to_string(),
-                });
-            }
-            stmts.push(self.parse_stmt()?);
-        }
-        self.expect(&TokenKind::RBrace, "expected '}' to close block")?;
-        Ok(stmts)
-    }
-
-    fn parse_expr(&mut self) -> Result<Expr, ParseError> {
-        self.parse_comparison()
-    }
-
-    fn parse_comparison(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_term()?;
-        loop {
-            if self.match_kind(&TokenKind::EqualEqual) {
-                let rhs = self.parse_term()?;
-                expr = Expr::Eq(Box::new(expr), Box::new(rhs));
-            } else if self.match_kind(&TokenKind::Less) {
-                let rhs = self.parse_term()?;
-                expr = Expr::Lt(Box::new(expr), Box::new(rhs));
-            } else if self.match_kind(&TokenKind::Greater) {
-                let rhs = self.parse_term()?;
-                expr = Expr::Gt(Box::new(expr), Box::new(rhs));
-            } else {
-                break;
-            }
-        }
-        Ok(expr)
-    }
-
-    fn parse_term(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_factor()?;
-        loop {
-            if self.match_kind(&TokenKind::Plus) {
-                let rhs = self.parse_factor()?;
-                expr = Expr::Add(Box::new(expr), Box::new(rhs));
-            } else if self.match_kind(&TokenKind::Minus) {
-                let rhs = self.parse_factor()?;
-                expr = Expr::Sub(Box::new(expr), Box::new(rhs));
-            } else {
-                break;
-            }
-        }
-        Ok(expr)
-    }
-
-    fn parse_factor(&mut self) -> Result<Expr, ParseError> {
-        let mut expr = self.parse_unary()?;
-        loop {
-            if self.match_kind(&TokenKind::Star) {
-                let rhs = self.parse_unary()?;
-                expr = Expr::Mul(Box::new(expr), Box::new(rhs));
-            } else if self.match_kind(&TokenKind::Slash) {
-                let rhs = self.parse_unary()?;
-                expr = Expr::Div(Box::new(expr), Box::new(rhs));
-            } else {
-                break;
-            }
-        }
-        Ok(expr)
-    }
-
-    fn parse_unary(&mut self) -> Result<Expr, ParseError> {
-        if self.match_kind(&TokenKind::Minus) {
-            let inner = self.parse_unary()?;
-            Ok(Expr::Neg(Box::new(inner)))
-        } else {
-            self.parse_primary()
-        }
-    }
-
-    fn parse_primary(&mut self) -> Result<Expr, ParseError> {
-        if self.match_kind(&TokenKind::True) {
-            return Ok(Expr::Bool(true));
-        }
-        if self.match_kind(&TokenKind::False) {
-            return Ok(Expr::Bool(false));
-        }
-        if let Some(value) = self.match_int() {
-            return Ok(Expr::Int(value));
-        }
-        if let Some(value) = self.match_string() {
-            return Ok(Expr::String(value));
-        }
-        if self.match_kind(&TokenKind::Pipe) {
-            return self.parse_closure_literal();
-        }
-        if let Some(name) = self.match_ident() {
-            if self.match_kind(&TokenKind::LParen) {
-                let args = self.parse_call_args()?;
-                if let Some(closure) = self.closure_bindings.get(&name).cloned() {
-                    if closure.param_slots.len() != args.len() {
-                        return Err(ParseError {
-                            line: self.current_line(),
-                            message: format!(
-                                "closure '{name}' expects {} arguments",
-                                closure.param_slots.len()
-                            ),
-                        });
-                    }
-                    return Ok(Expr::ClosureCall(closure, args));
-                }
-                let decl = self.resolve_function_for_call(&name, args.len())?;
-                return Ok(Expr::Call(decl.index, args));
-            }
-            if self.closure_bindings.contains_key(&name) {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: format!("closure '{name}' must be called with '(...)'"),
-                });
-            }
-            let index = self.get_local(&name)?;
-            return Ok(Expr::Var(index));
-        }
-        if self.match_kind(&TokenKind::LParen) {
-            let expr = self.parse_expr()?;
-            self.expect(&TokenKind::RParen, "expected ')' after expression")?;
-            return Ok(expr);
-        }
-
-        Err(ParseError {
-            line: self.current_line(),
-            message: "expected expression".to_string(),
-        })
-    }
-
-    fn parse_closure_literal(&mut self) -> Result<Expr, ParseError> {
-        let mut param_slots = Vec::new();
-        let mut param_scope = HashMap::new();
-        if !self.check(&TokenKind::Pipe) {
-            loop {
-                let param_name = self.expect_ident("expected closure parameter name")?;
-                if param_scope.contains_key(&param_name) {
-                    return Err(ParseError {
-                        line: self.current_line(),
-                        message: format!("duplicate closure parameter '{param_name}'"),
-                    });
-                }
-                let slot = self.allocate_hidden_local()?;
-                param_scope.insert(param_name, slot);
-                param_slots.push(slot);
-                if self.match_kind(&TokenKind::Comma) {
-                    continue;
-                }
-                break;
-            }
-        }
-        self.expect(&TokenKind::Pipe, "expected '|' after closure parameters")?;
-        self.closure_scopes.push(param_scope);
-        self.closure_capture_contexts.push(ClosureCaptureContext {
-            by_name: HashMap::new(),
-            capture_copies: Vec::new(),
-        });
-        let body = self.parse_expr()?;
-        let capture_context = self
-            .closure_capture_contexts
-            .pop()
-            .ok_or_else(|| ParseError {
-                line: self.current_line(),
-                message: "internal closure capture state error".to_string(),
-            })?;
-        self.closure_scopes.pop();
-        Ok(Expr::Closure(ClosureExpr {
-            param_slots,
-            capture_copies: capture_context.capture_copies,
-            body: Box::new(body),
-        }))
-    }
-
-    fn parse_call_args(&mut self) -> Result<Vec<Expr>, ParseError> {
-        let mut args = Vec::new();
-        if !self.check(&TokenKind::RParen) {
-            loop {
-                args.push(self.parse_expr()?);
-                if self.match_kind(&TokenKind::Comma) {
-                    continue;
-                }
-                break;
-            }
-        }
-        self.expect(&TokenKind::RParen, "expected ')' after arguments")?;
-        Ok(args)
-    }
-
-    fn expect(&mut self, kind: &TokenKind, message: &str) -> Result<(), ParseError> {
-        if self.match_kind(kind) {
-            Ok(())
-        } else {
-            Err(ParseError {
-                line: self.current_line(),
-                message: message.to_string(),
+    let mut runtime_import_functions: Vec<FunctionDecl> = functions
+        .iter()
+        .filter(|func| !function_impls.contains_key(&func.index))
+        .cloned()
+        .collect();
+    let mut call_index_remap = HashMap::<u16, u16>::new();
+    for (next_index, func) in runtime_import_functions.iter_mut().enumerate() {
+        let next_index = u16::try_from(next_index).map_err(|_| {
+            SourceError::Parse(ParseError {
+                line: 1,
+                message: "too many host imports after RSS function inlining".to_string(),
             })
-        }
-    }
-
-    fn expect_ident(&mut self, message: &str) -> Result<String, ParseError> {
-        if let Some(name) = self.match_ident() {
-            Ok(name)
-        } else {
-            Err(ParseError {
-                line: self.current_line(),
-                message: message.to_string(),
-            })
-        }
-    }
-
-    fn get_local(&mut self, name: &str) -> Result<u8, ParseError> {
-        for scope in self.closure_scopes.iter().rev() {
-            if let Some(&index) = scope.get(name) {
-                return Ok(index);
-            }
-        }
-        if let Some(source_index) = self.locals.get(name).copied() {
-            if let Some(capture_idx) = self.closure_capture_contexts.len().checked_sub(1) {
-                if let Some(&captured_slot) =
-                    self.closure_capture_contexts[capture_idx].by_name.get(name)
-                {
-                    return Ok(captured_slot);
-                }
-                let captured_slot = self.allocate_hidden_local()?;
-                self.closure_capture_contexts[capture_idx]
-                    .by_name
-                    .insert(name.to_string(), captured_slot);
-                self.closure_capture_contexts[capture_idx]
-                    .capture_copies
-                    .push((source_index, captured_slot));
-                return Ok(captured_slot);
-            }
-            return Ok(source_index);
-        }
-        Err(ParseError {
-            line: self.current_line(),
-            message: format!("unknown local '{name}'"),
-        })
-    }
-
-    fn resolve_function_for_call(
-        &mut self,
-        name: &str,
-        arg_count: usize,
-    ) -> Result<FunctionDecl, ParseError> {
-        if let Some(decl) = self.functions.get(name).cloned() {
-            if decl.arity as usize != arg_count {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: format!("function '{name}' expects {} arguments", decl.arity),
-                });
-            }
-            return Ok(decl);
-        }
-
-        if name == STDLIB_PRINT_NAME {
-            let arg_arity = u8::try_from(arg_count).map_err(|_| ParseError {
-                line: self.current_line(),
-                message: "function arity too large".to_string(),
-            })?;
-            if arg_arity != STDLIB_PRINT_ARITY {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: format!(
-                        "function '{STDLIB_PRINT_NAME}' expects {STDLIB_PRINT_ARITY} arguments"
-                    ),
-                });
-            }
-            return self.define_builtin_function(STDLIB_PRINT_NAME, STDLIB_PRINT_ARITY);
-        }
-
-        if self.allow_implicit_externs {
-            let arity = u8::try_from(arg_count).map_err(|_| ParseError {
-                line: self.current_line(),
-                message: "function arity too large".to_string(),
-            })?;
-            return self.define_external_function(name, arity);
-        }
-
-        Err(ParseError {
-            line: self.current_line(),
-            message: format!("unknown function '{name}'"),
-        })
-    }
-
-    fn define_builtin_function(
-        &mut self,
-        name: &str,
-        arity: u8,
-    ) -> Result<FunctionDecl, ParseError> {
-        if let Some(existing) = self.functions.get(name) {
-            return Ok(existing.clone());
-        }
-        if self.locals.contains_key(name) || self.closure_bindings.contains_key(name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!("name '{name}' already used by a local binding"),
-            });
-        }
-        let index = self.next_function;
-        self.next_function = self.next_function.checked_add(1).ok_or(ParseError {
-            line: self.current_line(),
-            message: "function index overflow".to_string(),
         })?;
-        let decl = FunctionDecl {
-            name: name.to_string(),
-            arity,
-            index,
-            args: vec!["value".to_string()],
-        };
-        self.functions.insert(name.to_string(), decl.clone());
-        self.function_list.push(decl.clone());
-        Ok(decl)
+        call_index_remap.insert(func.index, next_index);
+        func.index = next_index;
     }
+    let visible_runtime_import_functions = runtime_import_functions
+        .iter()
+        .filter(|func| !is_compiler_primitive_import(&func.name))
+        .cloned()
+        .collect::<Vec<_>>();
 
-    fn define_external_function(
-        &mut self,
-        name: &str,
-        arity: u8,
-    ) -> Result<FunctionDecl, ParseError> {
-        if let Some(existing) = self.functions.get(name) {
-            if existing.arity != arity {
-                return Err(ParseError {
-                    line: self.current_line(),
-                    message: format!("function '{name}' expects {} arguments", existing.arity),
-                });
-            }
-            return Ok(existing.clone());
-        }
-        if self.locals.contains_key(name) || self.closure_bindings.contains_key(name) {
-            return Err(ParseError {
-                line: self.current_line(),
-                message: format!("name '{name}' already used by a local binding"),
-            });
-        }
-        let index = self.next_function;
-        self.next_function = self.next_function.checked_add(1).ok_or(ParseError {
-            line: self.current_line(),
-            message: "function index overflow".to_string(),
-        })?;
-        let args = (0..arity).map(|idx| format!("arg{idx}")).collect();
-        let decl = FunctionDecl {
-            name: name.to_string(),
-            arity,
-            index,
-            args,
-        };
-        self.functions.insert(name.to_string(), decl.clone());
-        self.function_list.push(decl.clone());
-        Ok(decl)
-    }
-
-    fn get_or_assign_local(&mut self, name: &str) -> Result<u8, ParseError> {
-        if let Some(&index) = self.locals.get(name) {
-            return Ok(index);
-        }
-        let index = self.allocate_hidden_local()?;
-        self.locals.insert(name.to_string(), index);
-        Ok(index)
-    }
-
-    fn allocate_hidden_local(&mut self) -> Result<u8, ParseError> {
-        let index = self.next_local;
-        self.next_local = self.next_local.checked_add(1).ok_or(ParseError {
-            line: self.current_line(),
-            message: "local index overflow".to_string(),
-        })?;
-        Ok(index)
-    }
-
-    fn match_kind(&mut self, kind: &TokenKind) -> bool {
-        if self.check(kind) {
-            self.pos += 1;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn match_int(&mut self) -> Option<i64> {
-        match self.tokens.get(self.pos) {
-            Some(Token {
-                kind: TokenKind::Int(value),
-                ..
-            }) => {
-                let value = *value;
-                self.pos += 1;
-                Some(value)
-            }
-            _ => None,
-        }
-    }
-
-    fn match_ident(&mut self) -> Option<String> {
-        match self.tokens.get(self.pos) {
-            Some(Token {
-                kind: TokenKind::Ident(name),
-                ..
-            }) => {
-                let name = name.clone();
-                self.pos += 1;
-                Some(name)
-            }
-            _ => None,
-        }
-    }
-
-    fn match_string(&mut self) -> Option<String> {
-        match self.tokens.get(self.pos) {
-            Some(Token {
-                kind: TokenKind::String(value),
-                ..
-            }) => {
-                let value = value.clone();
-                self.pos += 1;
-                Some(value)
-            }
-            _ => None,
-        }
-    }
-
-    fn check_assignment_start(&self) -> bool {
-        matches!(
-            (self.tokens.get(self.pos), self.tokens.get(self.pos + 1)),
-            (
-                Some(Token {
-                    kind: TokenKind::Ident(_),
-                    ..
-                }),
-                Some(Token {
-                    kind: TokenKind::Equal,
-                    ..
-                })
-            )
-        )
-    }
-
-    fn check(&self, kind: &TokenKind) -> bool {
-        matches!(self.peek_kind(), Some(k) if std::mem::discriminant(k) == std::mem::discriminant(kind))
-    }
-
-    fn peek_kind(&self) -> Option<&TokenKind> {
-        self.tokens.get(self.pos).map(|token| &token.kind)
-    }
-
-    fn current_line(&self) -> usize {
-        self.tokens
-            .get(self.pos)
-            .map(|token| token.line)
-            .unwrap_or(1)
-    }
-
-    fn current_line_u32(&self) -> u32 {
-        u32::try_from(self.current_line()).unwrap_or(u32::MAX)
-    }
-
-    fn last_line(&self) -> u32 {
-        self.tokens
-            .get(self.pos.saturating_sub(1))
-            .map(|token| token.line)
-            .unwrap_or(1) as u32
-    }
-
-    fn local_count(&self) -> usize {
-        self.next_local as usize
-    }
-
-    fn function_decls(&self) -> Vec<FunctionDecl> {
-        self.function_list.clone()
-    }
-
-    fn local_bindings(&self) -> Vec<(String, u8)> {
-        let mut locals: Vec<(String, u8)> = self
-            .locals
-            .iter()
-            .map(|(name, index)| (name.clone(), *index))
-            .collect();
-        locals.sort_by_key(|(_, index)| *index);
-        locals
-    }
-}
-
-pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError> {
-    compile_source_with_flavor(source, SourceFlavor::Rss)
-}
-
-pub fn compile_source_with_flavor(
-    source: &str,
-    flavor: SourceFlavor,
-) -> Result<CompiledProgram, SourceError> {
-    let parsed = frontends::parse_source(source, flavor).map_err(SourceError::Parse)?;
     let mut compiler = Compiler::new();
-    compiler.set_source(source.to_string());
-    for func in &parsed.functions {
+    compiler.set_source(source);
+    compiler.set_function_impls(function_impls);
+    compiler.set_call_index_remap(call_index_remap);
+    for func in &functions {
         compiler.add_function_debug(func);
     }
-    for (name, index) in parsed.local_bindings {
+    for (name, index) in local_bindings {
         compiler.add_local_debug(name, index);
     }
     let mut program = compiler
-        .compile_program(&parsed.stmts)
+        .compile_program(&stmts)
         .map_err(SourceError::Compile)?;
-    program.imports = parsed
-        .functions
+    program.imports = runtime_import_functions
         .iter()
         .map(|func| HostImport {
             name: func.name.clone(),
@@ -1348,22 +312,51 @@ pub fn compile_source_with_flavor(
         .collect();
     Ok(CompiledProgram {
         program,
+        locals,
+        functions: visible_runtime_import_functions,
+    })
+}
+
+fn is_compiler_primitive_import(name: &str) -> bool {
+    name.starts_with("__prim_") || name.starts_with("intrinsic_")
+}
+
+pub fn compile_source(source: &str) -> Result<CompiledProgram, SourceError> {
+    compile_source_with_flavor(source, SourceFlavor::RustScript)
+}
+
+pub fn compile_source_with_flavor(
+    source: &str,
+    flavor: SourceFlavor,
+) -> Result<CompiledProgram, SourceError> {
+    let parsed = frontends::parse_source(source, flavor).map_err(SourceError::Parse)?;
+    compile_parsed_output(MergedFrontendOutput {
+        source: source.to_string(),
+        stmts: parsed.stmts,
         locals: parsed.locals,
+        local_bindings: parsed.local_bindings,
         functions: parsed.functions,
+        function_impls: parsed.function_impls,
     })
 }
 
 pub fn compile_source_file(path: impl AsRef<Path>) -> Result<CompiledProgram, SourcePathError> {
     let path = path.as_ref();
     let flavor = SourceFlavor::from_path(path)?;
-    let source = std::fs::read_to_string(path)?;
-    compile_source_with_flavor(&source, flavor).map_err(SourcePathError::Source)
+    let source_raw = std::fs::read_to_string(path)?;
+    let (root_source, units) =
+        source_loader::load_units_for_source_file(path, flavor, &source_raw)?;
+    let merged = merge_units(root_source, units)?;
+    compile_parsed_output(merged).map_err(SourcePathError::Source)
 }
 
 pub struct Compiler {
     assembler: Assembler,
     next_label_id: u32,
     loop_stack: Vec<LoopContext>,
+    function_impls: HashMap<u16, FunctionImpl>,
+    call_index_remap: HashMap<u16, u16>,
+    inline_call_stack: Vec<u16>,
 }
 
 struct LoopContext {
@@ -1383,6 +376,9 @@ impl Compiler {
             assembler: Assembler::new(),
             next_label_id: 0,
             loop_stack: Vec::new(),
+            function_impls: HashMap::new(),
+            call_index_remap: HashMap::new(),
+            inline_call_stack: Vec::new(),
         }
     }
 
@@ -1397,6 +393,14 @@ impl Compiler {
 
     pub fn add_local_debug(&mut self, name: String, index: u8) {
         self.assembler.add_local(name, index);
+    }
+
+    pub fn set_function_impls(&mut self, function_impls: HashMap<u16, FunctionImpl>) {
+        self.function_impls = function_impls;
+    }
+
+    pub fn set_call_index_remap(&mut self, call_index_remap: HashMap<u16, u16>) {
+        self.call_index_remap = call_index_remap;
     }
 
     pub fn compile_program(mut self, stmts: &[Stmt]) -> Result<Program, CompileError> {
@@ -1547,11 +551,37 @@ impl Compiler {
                 self.assembler.push_const(Value::String(value.clone()));
             }
             Expr::Call(index, args) => {
+                if let Some(function_impl) = self.function_impls.get(index).cloned() {
+                    for (arg, slot) in args.iter().zip(function_impl.param_slots.iter()) {
+                        self.compile_expr(arg)?;
+                        self.assembler.stloc(*slot);
+                    }
+                    if self.inline_call_stack.contains(index) {
+                        return Err(CompileError::InlineFunctionRecursion(format!(
+                            "recursive RustScript function call detected for function index {}",
+                            index
+                        )));
+                    }
+                    self.inline_call_stack.push(*index);
+                    let result = (|| -> Result<(), CompileError> {
+                        self.compile_stmts(&function_impl.body_stmts)?;
+                        self.compile_expr(&function_impl.body_expr)
+                    })();
+                    self.inline_call_stack.pop();
+                    result?;
+                    return Ok(());
+                }
                 for arg in args {
                     self.compile_expr(arg)?;
                 }
                 let argc = u8::try_from(args.len()).map_err(|_| CompileError::CallArityOverflow)?;
-                self.assembler.call(*index, argc);
+                if let Some(builtin) = BuiltinFunction::from_call_index(*index) {
+                    debug_assert_eq!(argc, builtin.arity());
+                    self.assembler.call(*index, argc);
+                    return Ok(());
+                }
+                let remapped_index = self.call_index_remap.get(index).copied().unwrap_or(*index);
+                self.assembler.call(remapped_index, argc);
             }
             Expr::Closure(_) => {
                 return Err(CompileError::ClosureUsedAsValue);

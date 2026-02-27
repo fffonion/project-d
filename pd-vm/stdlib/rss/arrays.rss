@@ -1,0 +1,17 @@
+// Array helpers implemented in pure RustScript over builtin syntax.
+pub fn array_new() {
+    [];
+}
+
+pub fn array_len(values) {
+    len(values);
+}
+
+pub fn array_get(values, index) {
+    values[index];
+}
+
+pub fn array_push(values, value) {
+    values[len(values)] = value;
+    values;
+}

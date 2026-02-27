@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
-use super::super::{ParseError, is_ident_continue, is_ident_start};
+use super::super::ParseError;
+use super::{is_ident_continue, is_ident_start};
 
 pub(super) fn lower(source: &str) -> Result<String, ParseError> {
     let mut parser = SchemeParser::new(source)?;
@@ -362,6 +363,9 @@ fn lower_stmt(form: &SchemeForm, indent: usize, out: &mut Vec<String>) -> Result
             "for" => return lower_for_stmt(args, form.line, indent, out),
             "break" => return lower_break_stmt(args, form.line, indent, out),
             "continue" => return lower_continue_stmt(args, form.line, indent, out),
+            "vector-set!" | "hash-set!" => {
+                return lower_index_set_stmt(head, args, form.line, indent, out);
+            }
             "begin" => return lower_begin_stmt(args, indent, out),
             "declare" => return lower_declare_stmt(args, form.line, indent, out),
             _ => {}
@@ -695,6 +699,34 @@ fn lower_continue_stmt(
     Ok(())
 }
 
+fn lower_index_set_stmt(
+    head: &str,
+    args: &[SchemeForm],
+    line: usize,
+    indent: usize,
+    out: &mut Vec<String>,
+) -> Result<(), ParseError> {
+    if args.len() != 3 {
+        return Err(ParseError {
+            line,
+            message: format!("{head} expects exactly three arguments"),
+        });
+    }
+    let target_raw = args[0].as_symbol().ok_or(ParseError {
+        line: args[0].line,
+        message: format!("{head} target must be a symbol"),
+    })?;
+    let target = normalize_identifier(target_raw, args[0].line, &format!("{head} target"))?;
+    let key = if head == "hash-set!" {
+        lower_hash_key_expr(&args[1])?
+    } else {
+        lower_expr(&args[1])?
+    };
+    let value = lower_expr(&args[2])?;
+    push_line(out, indent, &format!("{target}[{key}] = {value};"));
+    Ok(())
+}
+
 fn lower_begin_stmt(
     args: &[SchemeForm],
     indent: usize,
@@ -821,9 +853,57 @@ fn lower_list_expr(items: &[SchemeForm], line: usize) -> Result<String, ParseErr
         "=" => lower_binary_expr(args, "==", line, "= expects exactly two arguments"),
         "<" => lower_binary_expr(args, "<", line, "< expects exactly two arguments"),
         ">" => lower_binary_expr(args, ">", line, "> expects exactly two arguments"),
+        "vector" => {
+            let mut rendered = Vec::new();
+            for arg in args {
+                rendered.push(lower_expr(arg)?);
+            }
+            Ok(format!("[{}]", rendered.join(", ")))
+        }
+        "hash" => {
+            let mut rendered = Vec::new();
+            for entry in args {
+                let pair = entry.as_list().ok_or(ParseError {
+                    line: entry.line,
+                    message: "hash entries must be two-item lists".to_string(),
+                })?;
+                if pair.len() != 2 {
+                    return Err(ParseError {
+                        line: entry.line,
+                        message: "hash entries must contain exactly key and value".to_string(),
+                    });
+                }
+                let key = lower_hash_key_expr(&pair[0])?;
+                let value = lower_expr(&pair[1])?;
+                rendered.push(format!("{key}: {value}"));
+            }
+            Ok(format!("{{{}}}", rendered.join(", ")))
+        }
+        "vector-ref" => {
+            if args.len() != 2 {
+                return Err(ParseError {
+                    line,
+                    message: "vector-ref expects exactly two arguments".to_string(),
+                });
+            }
+            let container = lower_expr(&args[0])?;
+            let key = lower_expr(&args[1])?;
+            Ok(format!("({container})[{key}]"))
+        }
+        "hash-ref" => {
+            if args.len() != 2 {
+                return Err(ParseError {
+                    line,
+                    message: "hash-ref expects exactly two arguments".to_string(),
+                });
+            }
+            let container = lower_expr(&args[0])?;
+            let key = lower_hash_key_expr(&args[1])?;
+            Ok(format!("({container})[{key}]"))
+        }
         "lambda" => lower_lambda_expr(args, line),
         "if" | "while" | "do" | "for" | "define" | "set!" | "declare" | "break" | "continue"
-        | "begin" => Err(ParseError {
+        | "begin" | "vector-set!" | "hash-set!" => Err(ParseError {
             line,
             message: format!("special form '{head}' is only valid in statement position"),
         }),
@@ -836,6 +916,13 @@ fn lower_list_expr(items: &[SchemeForm], line: usize) -> Result<String, ParseErr
             Ok(format!("{callee}({})", rendered.join(", ")))
         }
     }
+}
+
+fn lower_hash_key_expr(form: &SchemeForm) -> Result<String, ParseError> {
+    if let Some(symbol) = form.as_symbol() {
+        return Ok(render_string(symbol));
+    }
+    lower_expr(form)
 }
 
 fn lower_lambda_expr(args: &[SchemeForm], line: usize) -> Result<String, ParseError> {

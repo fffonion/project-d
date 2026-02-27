@@ -1,3 +1,5 @@
+mod builtins;
+
 pub mod assembler;
 pub mod compiler;
 pub mod debug;

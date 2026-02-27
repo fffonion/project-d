@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use crate::builtins::BuiltinFunction;
 use crate::debug::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
 use crate::vm::{HostImport, OpCode, Program, Value};
 
@@ -23,6 +24,7 @@ pub enum WireError {
     InvalidUtf8,
     StringTooLong(usize),
     CodeTooLong(usize),
+    UnsupportedConstantType(&'static str),
     LengthTooLarge(&'static str, usize),
     TrailingBytes,
 }
@@ -42,6 +44,9 @@ impl std::fmt::Display for WireError {
             WireError::InvalidUtf8 => write!(f, "invalid utf-8 string"),
             WireError::StringTooLong(len) => write!(f, "string too long: {len}"),
             WireError::CodeTooLong(len) => write!(f, "code too long: {len}"),
+            WireError::UnsupportedConstantType(kind) => {
+                write!(f, "unsupported constant type for wire format: {kind}")
+            }
             WireError::LengthTooLarge(field, len) => {
                 write!(f, "{field} length too large: {len}")
             }
@@ -148,6 +153,12 @@ pub fn encode_program(program: &Program) -> Result<Vec<u8>, WireError> {
                 out.push(2);
                 write_u32_len("constant string", value.len(), &mut out)?;
                 out.extend_from_slice(value.as_bytes());
+            }
+            Value::Array(_) => {
+                return Err(WireError::UnsupportedConstantType("array"));
+            }
+            Value::Map(_) => {
+                return Err(WireError::UnsupportedConstantType("map"));
             }
         }
     }
@@ -335,6 +346,17 @@ fn analyze_program(
                     opcode,
                     expected_bytes: 3,
                 })?;
+                if let Some(builtin) = BuiltinFunction::from_call_index(index) {
+                    if argc != builtin.arity() {
+                        return Err(ValidationError::InvalidCallArity {
+                            offset: start,
+                            index,
+                            expected: builtin.arity(),
+                            got: argc,
+                        });
+                    }
+                    continue;
+                }
                 if program.imports.is_empty() {
                     if let Some(host_fn_count) = host_fn_count
                         && index >= host_fn_count

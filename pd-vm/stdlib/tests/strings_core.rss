@@ -1,0 +1,25 @@
+import { equals, is_empty } from "../rss/strings.rss";
+
+let ok = true;
+
+if equals("rustscript", "rustscript") {
+} else {
+    ok = false;
+}
+
+if equals("rustscript", "vm") {
+    ok = false;
+} else {
+}
+
+if is_empty("") {
+} else {
+    ok = false;
+}
+
+if is_empty("rustscript") {
+    ok = false;
+} else {
+}
+
+ok;

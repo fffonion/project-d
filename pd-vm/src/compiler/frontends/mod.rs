@@ -1,22 +1,25 @@
+use std::collections::HashMap;
+
 mod javascript;
 mod lua;
-mod rss;
+mod rustscript;
 mod scheme;
 
-use super::{FunctionDecl, ParseError, Parser, SourceFlavor, Stmt};
+use super::{FunctionDecl, FunctionImpl, ParseError, SourceFlavor, Stmt, parser::Parser};
 
 pub(super) struct FrontendOutput {
     pub(super) stmts: Vec<Stmt>,
     pub(super) locals: usize,
     pub(super) local_bindings: Vec<(String, u8)>,
     pub(super) functions: Vec<FunctionDecl>,
+    pub(super) function_impls: HashMap<u16, FunctionImpl>,
 }
 
 trait FrontendCompiler {
     fn parse(&self, source: &str) -> Result<FrontendOutput, ParseError>;
 }
 
-struct RssCompiler;
+struct RustScriptCompiler;
 struct JavaScriptCompiler;
 struct LuaCompiler;
 struct SchemeCompiler;
@@ -26,7 +29,7 @@ pub(super) fn parse_source(
     flavor: SourceFlavor,
 ) -> Result<FrontendOutput, ParseError> {
     let frontend: &dyn FrontendCompiler = match flavor {
-        SourceFlavor::Rss => &RssCompiler,
+        SourceFlavor::RustScript => &RustScriptCompiler,
         SourceFlavor::JavaScript => &JavaScriptCompiler,
         SourceFlavor::Lua => &LuaCompiler,
         SourceFlavor::Scheme => &SchemeCompiler,
@@ -34,9 +37,17 @@ pub(super) fn parse_source(
     frontend.parse(source)
 }
 
-impl FrontendCompiler for RssCompiler {
+pub(super) fn is_ident_start(ch: char) -> bool {
+    ch.is_ascii_alphabetic() || ch == '_'
+}
+
+pub(super) fn is_ident_continue(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
+}
+
+impl FrontendCompiler for RustScriptCompiler {
     fn parse(&self, source: &str) -> Result<FrontendOutput, ParseError> {
-        let lowered = rss::lower(source);
+        let lowered = rustscript::lower(source);
         parse_with_parser(&lowered, false)
     }
 }
@@ -73,5 +84,6 @@ fn parse_with_parser(
         locals: parser.local_count(),
         local_bindings: parser.local_bindings(),
         functions: parser.function_decls(),
+        function_impls: parser.function_impls(),
     })
 }

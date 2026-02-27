@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::Arc;
+
+use crate::builtins::BuiltinFunction;
 #[cfg(any(
     all(
         target_arch = "x86_64",
@@ -10,6 +12,7 @@ use std::sync::Arc;
 ))]
 use std::sync::{Mutex, OnceLock};
 
+mod builtin_runtime;
 #[cfg(any(
     all(
         target_arch = "x86_64",
@@ -25,6 +28,8 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     String(String),
+    Array(Vec<Value>),
+    Map(Vec<(Value, Value)>),
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -457,6 +462,7 @@ pub struct Vm {
     jit: crate::jit::TraceJitEngine,
     native_traces: HashMap<usize, NativeTrace>,
     native_trace_exec_count: u64,
+    io_state: builtin_runtime::IoState,
 }
 
 enum StepExecOutcome {
@@ -608,6 +614,21 @@ fn hash_value(value: &Value, state: &mut impl Hasher) {
             3u8.hash(state);
             value.hash(state);
         }
+        Value::Array(values) => {
+            4u8.hash(state);
+            values.len().hash(state);
+            for value in values {
+                hash_value(value, state);
+            }
+        }
+        Value::Map(entries) => {
+            5u8.hash(state);
+            entries.len().hash(state);
+            for (key, value) in entries {
+                hash_value(key, state);
+                hash_value(value, state);
+            }
+        }
     }
 }
 
@@ -628,6 +649,7 @@ impl Vm {
             jit: crate::jit::TraceJitEngine::default(),
             native_traces: HashMap::new(),
             native_trace_exec_count: 0,
+            io_state: builtin_runtime::IoState::default(),
         }
     }
 
@@ -647,6 +669,7 @@ impl Vm {
             jit: crate::jit::TraceJitEngine::default(),
             native_traces: HashMap::new(),
             native_trace_exec_count: 0,
+            io_state: builtin_runtime::IoState::default(),
         }
     }
 
@@ -1265,13 +1288,29 @@ impl Vm {
     }
 
     fn execute_host_call(&mut self, index: u16, argc_u8: u8, call_ip: usize) -> VmResult<bool> {
-        let resolved_index = self.resolve_call_target(index, argc_u8)?;
         let argc = argc_u8 as usize;
         let mut args = Vec::with_capacity(argc);
         for _ in 0..argc {
             args.push(self.pop_value()?);
         }
         args.reverse();
+
+        if let Some(builtin) = BuiltinFunction::from_call_index(index) {
+            if argc_u8 != builtin.arity() {
+                return Err(VmError::InvalidCallArity {
+                    import: builtin.name().to_string(),
+                    expected: builtin.arity(),
+                    got: argc_u8,
+                });
+            }
+            let values = builtin_runtime::execute_builtin_call(self, builtin, &args)?;
+            for value in values {
+                self.stack.push(value);
+            }
+            return Ok(false);
+        }
+
+        let resolved_index = self.resolve_call_target(index, argc_u8)?;
 
         self.call_depth += 1;
         let function_ptr = self
@@ -1411,6 +1450,12 @@ impl Vm {
             .get(index as usize)
             .copied()
             .ok_or(VmError::InvalidCall(index))
+    }
+}
+
+impl Drop for Vm {
+    fn drop(&mut self) {
+        builtin_runtime::close_all_handles(self);
     }
 }
 

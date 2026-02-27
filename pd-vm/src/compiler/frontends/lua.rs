@@ -1,4 +1,5 @@
-use super::super::{ParseError, is_ident_continue, is_ident_start};
+use super::super::ParseError;
+use super::{is_ident_continue, is_ident_start};
 
 enum LuaBlock {
     If,

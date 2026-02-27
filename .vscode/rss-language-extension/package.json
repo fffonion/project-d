@@ -1,7 +1,7 @@
 {
-  "name": "pd-rss-syntax",
-  "displayName": "PD RSS Syntax",
-  "description": "Syntax highlighting for Project D Rust-like .rss files.",
+  "name": "rustscript-syntax",
+  "displayName": "RustScript Syntax",
+  "description": "Syntax highlighting for RustScript .rss files.",
   "version": "0.0.1",
   "publisher": "local",
   "license": "UNLICENSED",
@@ -14,9 +14,9 @@
   "contributes": {
     "languages": [
       {
-        "id": "pd-rss",
+        "id": "rustscript",
         "aliases": [
-          "PD RSS",
+          "RustScript",
           "rss"
         ],
         "extensions": [
@@ -27,7 +27,7 @@
     ],
     "grammars": [
       {
-        "language": "pd-rss",
+        "language": "rustscript",
         "scopeName": "source.rss",
         "path": "./syntaxes/rss.tmLanguage.json"
       }

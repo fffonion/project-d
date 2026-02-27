@@ -365,10 +365,10 @@ fn perf_jit_native_reduces_tight_loop_latency() {
 
 #[test]
 #[ignore = "manual run performance test; run explicitly"]
-fn perf_manual_aes_128_cbc_rss_matches_in_interpreter_and_jit() {
+fn perf_manual_aes_128_cbc_rustscript_matches_in_interpreter_and_jit() {
     let source = include_str!("../examples/aes_128_cbc.rss");
-    let compiled = compile_source_with_flavor(source, SourceFlavor::Rss)
-        .expect("aes rss example should compile");
+    let compiled = compile_source_with_flavor(source, SourceFlavor::RustScript)
+        .expect("aes RustScript example should compile");
 
     let expected = vec![
         Value::Int(0),
@@ -405,7 +405,7 @@ fn perf_manual_aes_128_cbc_rss_matches_in_interpreter_and_jit() {
         let interpreter_started = Instant::now();
         let interpreter_status = vm_interpreter
             .run()
-            .expect("aes rss example should run in interpreter mode");
+            .expect("aes RustScript example should run in interpreter mode");
         let interpreter_elapsed = interpreter_started.elapsed();
         assert_eq!(
             interpreter_status,
@@ -428,7 +428,7 @@ fn perf_manual_aes_128_cbc_rss_matches_in_interpreter_and_jit() {
         let jit_started = Instant::now();
         let jit_status = vm_jit
             .run()
-            .expect("aes rss example should run in jit mode");
+            .expect("aes RustScript example should run in jit mode");
         let jit_elapsed = jit_started.elapsed();
         assert_eq!(
             jit_status,

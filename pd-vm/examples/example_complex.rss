@@ -1,0 +1,22 @@
+import * as string from "../stdlib/rss/strings.rss";
+
+fn add_one(x);
+
+// Complex RustScript example with closure capture, stdlib import, and host calls.
+let total = 0;
+for (let i = 0; i < 4; i = i + 1) {
+    total = total + i;
+}
+
+if string.non_empty("rustscript") {
+    total = add_one(total);
+} else {
+    total = 0;
+}
+
+let base = 7;
+let add = |value| value + base;
+let base = 8;
+let closure_value = add(5);
+
+print!(closure_value);

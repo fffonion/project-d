@@ -1,4 +1,4 @@
-use super::super::is_ident_continue;
+use super::is_ident_continue;
 
 pub(super) fn lower(source: &str) -> String {
     rewrite_rss_print_macro(source)

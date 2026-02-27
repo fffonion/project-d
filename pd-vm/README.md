@@ -88,7 +88,7 @@ Directives:
 
 ### Tiny compiler
 
-Use `compile_source()` for Rss syntax (`.rss`) or `compile_source_file()` to auto-detect
+Use `compile_source()` for RustScript syntax (`.rss`) or `compile_source_file()` to auto-detect
 syntax by extension (`.rss`, `.js`, `.lua`, `.scm`). It returns `CompiledProgram`, which includes the
 program and required local count.
 
@@ -118,7 +118,7 @@ local add = function(value) return value + base end
 ```
 
 Built-in print aliases (no declaration needed):
-- Rss: `print!(value);`
+- RustScript: `print!(value);`
 - JavaScript subset: `console.log(value);` and `print(value);`
 - Lua subset: `print(value)`
 - Scheme subset: `(print value)`

@@ -503,6 +503,73 @@ fn compile_source_with_scheme_flavor() {
 }
 
 #[test]
+fn collections_are_created_and_accessed_in_all_frontends() {
+    let rustscript = r#"
+        let arr = [1, 2, 3];
+        let second = arr[1];
+        arr[1] = 9;
+        let m = {"x": 1, "y": 2};
+        m.z = 7;
+        m["x"] = 4;
+        let v1 = m.x;
+        let v2 = m["z"];
+        second + arr[1] + v1 + v2;
+    "#;
+    let javascript = r#"
+        let arr = [1, 2, 3];
+        let second = arr[1];
+        arr[1] = 9;
+        let m = { x: 1, y: 2 };
+        m.z = 7;
+        m["x"] = 4;
+        let v1 = m.x;
+        let v2 = m["z"];
+        second + arr[1] + v1 + v2;
+    "#;
+    let lua = r#"
+        local arr = {1, 2, 3}
+        local second = arr[1]
+        arr[1] = 9
+        local m = { x = 1, y = 2 }
+        m.z = 7
+        m["x"] = 4
+        local v1 = m.x
+        local v2 = m["z"]
+        second + arr[1] + v1 + v2
+    "#;
+    let scheme = r#"
+        (define arr (vector 1 2 3))
+        (define second (vector-ref arr 1))
+        (vector-set! arr 1 9)
+        (define m (hash (x 1) ("y" 2)))
+        (hash-set! m z 7)
+        (hash-set! m "x" 4)
+        (define v1 (hash-ref m x))
+        (define v2 (hash-ref m "z"))
+        (+ second (vector-ref arr 1) v1 v2)
+    "#;
+
+    let cases = [
+        (SourceFlavor::RustScript, rustscript),
+        (SourceFlavor::JavaScript, javascript),
+        (SourceFlavor::Lua, lua),
+        (SourceFlavor::Scheme, scheme),
+    ];
+
+    for (flavor, source) in cases {
+        let compiled = compile_source_with_flavor(source, flavor).expect("compile should succeed");
+        assert!(
+            compiled.functions.is_empty(),
+            "collection intrinsics should be compiler-managed, not host imports"
+        );
+        let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+        let status = vm.run().expect("vm should run");
+        assert_eq!(status, VmStatus::Halted);
+        assert_eq!(vm.stack(), &[Value::Int(22)]);
+    }
+}
+
+#[test]
 fn lua_assignment_updates_existing_local_without_new_slot() {
     let source = r#"
         local a = 1
@@ -615,14 +682,15 @@ fn lua_print_works_without_decl() {
 }
 
 #[test]
-fn compile_source_with_closure() {
-    let source = include_str!("../examples/closure.rss");
-    let compiled = compile_source(source).expect("compile should succeed");
+fn compile_source_file_with_rustscript_complex_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.rss");
+    let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
     for func in &compiled.functions {
         match func.name.as_str() {
             "print" => vm.register_function(Box::new(PrintBuiltin)),
+            "add_one" => vm.register_function(Box::new(AddOne)),
             _ => panic!("unexpected function {}", func.name),
         };
     }
@@ -656,15 +724,15 @@ fn closure_captures_outer_value_at_definition_time() {
 }
 
 #[test]
-fn compile_source_with_javascript_closure_fixture() {
-    let source = include_str!("../examples/closure.js");
-    let compiled = compile_source_with_flavor(source, SourceFlavor::JavaScript)
-        .expect("compile should succeed");
+fn compile_source_file_with_javascript_complex_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.js");
+    let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
     for func in &compiled.functions {
         match func.name.as_str() {
             "print" => vm.register_function(Box::new(PrintBuiltin)),
+            "add_one" => vm.register_function(Box::new(AddOne)),
             _ => panic!("unexpected function {}", func.name),
         };
     }
@@ -675,15 +743,15 @@ fn compile_source_with_javascript_closure_fixture() {
 }
 
 #[test]
-fn compile_source_with_lua_closure_fixture() {
-    let source = include_str!("../examples/closure.lua");
-    let compiled =
-        compile_source_with_flavor(source, SourceFlavor::Lua).expect("compile should succeed");
+fn compile_source_file_with_lua_complex_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.lua");
+    let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
     for func in &compiled.functions {
         match func.name.as_str() {
             "print" => vm.register_function(Box::new(PrintBuiltin)),
+            "add_one" => vm.register_function(Box::new(AddOne)),
             _ => panic!("unexpected function {}", func.name),
         };
     }
@@ -694,15 +762,15 @@ fn compile_source_with_lua_closure_fixture() {
 }
 
 #[test]
-fn compile_source_with_scheme_closure_fixture() {
-    let source = include_str!("../examples/closure.scm");
-    let compiled =
-        compile_source_with_flavor(source, SourceFlavor::Scheme).expect("compile should succeed");
+fn compile_source_file_with_scheme_complex_fixture() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/example_complex.scm");
+    let compiled = compile_source_file(&path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
 
     for func in &compiled.functions {
         match func.name.as_str() {
             "print" => vm.register_function(Box::new(PrintBuiltin)),
+            "add_one" => vm.register_function(Box::new(AddOne)),
             _ => panic!("unexpected function {}", func.name),
         };
     }
@@ -894,6 +962,602 @@ fn compile_source_file_detects_scheme_extension() {
 }
 
 #[test]
+fn compile_source_file_rustscript_imports_merge_with_scoped_locals() {
+    let unique = format!(
+        "vm_rss_import_scope_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("module.rss");
+    let main_path = root.join("main.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        pub fn add_one(x);
+        let shared = 40;
+    "#,
+    )
+    .expect("module source should write");
+    std::fs::write(
+        &main_path,
+        r#"
+        import "./module.rss";
+        let shared = add_one(1);
+        shared;
+    "#,
+    )
+    .expect("main source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert_eq!(
+        compiled.locals, 2,
+        "module and root locals should be isolated"
+    );
+    assert_eq!(
+        compiled
+            .functions
+            .iter()
+            .filter(|func| func.name == "add_one")
+            .count(),
+        1,
+        "imported function should only be declared once",
+    );
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(2)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_supports_rss_modules_from_js_lua_and_scheme() {
+    let unique = format!(
+        "vm_cross_flavor_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+    let module_path = root.join("module.rss");
+    std::fs::write(&module_path, "pub fn add_one(x);\n").expect("module source should write");
+
+    let js_path = root.join("main.js");
+    std::fs::write(
+        &js_path,
+        r#"
+        import { add_one } from "./module.rss";
+        console.log(add_one(41));
+    "#,
+    )
+    .expect("js source should write");
+    let js_compiled = compile_source_file(&js_path).expect("js compile should succeed");
+    let mut js_vm = Vm::with_locals(js_compiled.program, js_compiled.locals);
+    for func in &js_compiled.functions {
+        match func.name.as_str() {
+            "add_one" => js_vm.register_function(Box::new(AddOne)),
+            "print" => js_vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+    let js_status = js_vm.run().expect("js vm should run");
+    assert_eq!(js_status, VmStatus::Halted);
+    assert_eq!(js_vm.stack(), &[Value::Int(42)]);
+
+    let lua_path = root.join("main.lua");
+    std::fs::write(
+        &lua_path,
+        r#"
+        local _m = require("./module.rss")
+        print(add_one(41))
+    "#,
+    )
+    .expect("lua source should write");
+    let lua_compiled = compile_source_file(&lua_path).expect("lua compile should succeed");
+    let mut lua_vm = Vm::with_locals(lua_compiled.program, lua_compiled.locals);
+    for func in &lua_compiled.functions {
+        match func.name.as_str() {
+            "add_one" => lua_vm.register_function(Box::new(AddOne)),
+            "print" => lua_vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+    let lua_status = lua_vm.run().expect("lua vm should run");
+    assert_eq!(lua_status, VmStatus::Halted);
+    assert_eq!(lua_vm.stack(), &[Value::Int(42)]);
+
+    let scm_path = root.join("main.scm");
+    std::fs::write(
+        &scm_path,
+        r#"
+        (import "./module.rss")
+        (print (add_one 41))
+    "#,
+    )
+    .expect("scheme source should write");
+    let scm_compiled = compile_source_file(&scm_path).expect("scheme compile should succeed");
+    let mut scm_vm = Vm::with_locals(scm_compiled.program, scm_compiled.locals);
+    for func in &scm_compiled.functions {
+        match func.name.as_str() {
+            "add_one" => scm_vm.register_function(Box::new(AddOne)),
+            "print" => scm_vm.register_function(Box::new(PrintBuiltin)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+    let scm_status = scm_vm.run().expect("scheme vm should run");
+    assert_eq!(scm_status, VmStatus::Halted);
+    assert_eq!(scm_vm.stack(), &[Value::Int(42)]);
+
+    let _ = std::fs::remove_file(scm_path);
+    let _ = std::fs::remove_file(lua_path);
+    let _ = std::fs::remove_file(js_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_lua_supports_namespace_and_named_require_imports() {
+    let unique = format!(
+        "vm_lua_namespace_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("strings.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        pub fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.lua");
+    std::fs::write(
+        &main_path,
+        r#"
+        local string = require("./strings.rss")
+        local is_empty = require("./strings.rss").is_empty
+        print(string.non_empty("rss"))
+        print(is_empty(""))
+    "#,
+    )
+    .expect("lua source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert_eq!(compiled.functions.len(), 1);
+    assert_eq!(compiled.functions[0].name, "print");
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("print", Box::new(PrintBuiltin));
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true), Value::Bool(true)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_scheme_supports_library_import_sets() {
+    let unique = format!(
+        "vm_scheme_library_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("strings.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        pub fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.scm");
+    std::fs::write(
+        &main_path,
+        r#"
+        (import (prefix "./strings.rss" string:))
+        (import (only "./strings.rss" is_empty))
+        (print (string:non_empty "rss"))
+        (print (is_empty ""))
+    "#,
+    )
+    .expect("scheme source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert_eq!(compiled.functions.len(), 1);
+    assert_eq!(compiled.functions[0].name, "print");
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("print", Box::new(PrintBuiltin));
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true), Value::Bool(true)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_scheme_supports_module_language_require_sets() {
+    let unique = format!(
+        "vm_scheme_require_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("strings.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        pub fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.scm");
+    std::fs::write(
+        &main_path,
+        r#"
+        (require (prefix-in string: "./strings.rss"))
+        (require (only-in "./strings.rss" is_empty))
+        (print (string:non_empty "rss"))
+        (print (is_empty ""))
+    "#,
+    )
+    .expect("scheme source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert_eq!(compiled.functions.len(), 1);
+    assert_eq!(compiled.functions[0].name, "print");
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("print", Box::new(PrintBuiltin));
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true), Value::Bool(true)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_js_supports_namespace_and_named_alias_imports() {
+    let unique = format!(
+        "vm_js_namespace_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("strings.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        pub fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.js");
+    std::fs::write(
+        &main_path,
+        r#"
+        import * as string from "./strings.rss";
+        import { is_empty as is_empty } from "./strings.rss";
+
+        console.log(string.non_empty("rss"));
+        console.log(is_empty(""));
+    "#,
+    )
+    .expect("js source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert_eq!(compiled.functions.len(), 1);
+    assert_eq!(compiled.functions[0].name, "print");
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("print", Box::new(PrintBuiltin));
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true), Value::Bool(true)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_rustscript_supports_namespace_and_named_imports() {
+    let unique = format!(
+        "vm_rustscript_namespace_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("strings.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        pub fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.rss");
+    std::fs::write(
+        &main_path,
+        r#"
+        import * as string from "./strings.rss";
+        import { is_empty as is_empty } from "./strings.rss";
+
+        string.non_empty("rss");
+        is_empty("");
+    "#,
+    )
+    .expect("main source should write");
+
+    let compiled = compile_source_file(&main_path).expect("compile should succeed");
+    assert!(
+        compiled.functions.is_empty(),
+        "module functions should be fully inlined for RustScript root"
+    );
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true), Value::Bool(true)]);
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_rustscript_named_import_is_selective() {
+    let unique = format!(
+        "vm_rustscript_selective_import_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("module.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        pub fn add_one(x) {
+            x + 1;
+        }
+        pub fn add_two(x) {
+            x + 2;
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let main_path = root.join("main.rss");
+    std::fs::write(
+        &main_path,
+        r#"
+        import { add_one } from "./module.rss";
+        add_two(40);
+    "#,
+    )
+    .expect("main source should write");
+
+    let err = match compile_source_file(&main_path) {
+        Ok(_) => panic!("selective import should not expose unlisted exports"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err,
+            vm::SourcePathError::Source(vm::SourceError::Parse(vm::ParseError { ref message, .. }))
+            if message.contains("unknown function 'add_two'")
+        ),
+        "expected unknown function error, got {err:?}"
+    );
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_rustscript_module_exports_only_pub_functions() {
+    let unique = format!(
+        "vm_rustscript_pub_export_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let module_path = root.join("module.rss");
+    std::fs::write(
+        &module_path,
+        r#"
+        fn private_add(x) {
+            x + 1;
+        }
+        pub fn public_add(x) {
+            private_add(x);
+        }
+    "#,
+    )
+    .expect("module source should write");
+
+    let ok_main_path = root.join("main_ok.rss");
+    std::fs::write(
+        &ok_main_path,
+        r#"
+        import "./module.rss";
+        public_add(41);
+    "#,
+    )
+    .expect("ok main source should write");
+    let compiled = compile_source_file(&ok_main_path).expect("compile should succeed");
+    assert!(
+        compiled.functions.is_empty(),
+        "pure RustScript function module should not require host imports"
+    );
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+
+    let bad_main_path = root.join("main_bad.rss");
+    std::fs::write(
+        &bad_main_path,
+        r#"
+        import "./module.rss";
+        private_add(41);
+    "#,
+    )
+    .expect("bad main source should write");
+    let err = match compile_source_file(&bad_main_path) {
+        Ok(_) => panic!("private import should fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            err,
+            vm::SourcePathError::Source(vm::SourceError::Parse(vm::ParseError { ref message, .. }))
+            if message.contains("unknown function 'private_add'")
+        ),
+        "expected unknown function error, got {err:?}"
+    );
+
+    let _ = std::fs::remove_file(bad_main_path);
+    let _ = std::fs::remove_file(ok_main_path);
+    let _ = std::fs::remove_file(module_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn compile_source_file_rejects_import_cycles() {
+    let unique = format!(
+        "vm_import_cycle_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+
+    let main_path = root.join("main.rss");
+    let a_path = root.join("a.rss");
+    let b_path = root.join("b.rss");
+    std::fs::write(&main_path, "import \"./a.rss\";\n1;\n").expect("main source should write");
+    std::fs::write(&a_path, "import \"./b.rss\";\n").expect("module a source should write");
+    std::fs::write(&b_path, "import \"./a.rss\";\n").expect("module b source should write");
+
+    let err = match compile_source_file(&main_path) {
+        Ok(_) => panic!("cycle should fail"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, vm::SourcePathError::ImportCycle(_)));
+
+    let _ = std::fs::remove_file(main_path);
+    let _ = std::fs::remove_file(a_path);
+    let _ = std::fs::remove_file(b_path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
 fn compile_source_with_string_literals() {
     let source = r#"
         fn echo(x);
@@ -913,6 +1577,33 @@ fn compile_source_with_string_literals() {
     let status = vm.run().expect("vm should run");
     assert_eq!(status, VmStatus::Halted);
     assert_eq!(vm.stack(), &[Value::String("hello".to_string())]);
+}
+
+#[test]
+fn rss_function_definition_is_inlined_without_host_imports() {
+    let source = r#"
+        fn eq(lhs, rhs) {
+            lhs == rhs;
+        }
+        fn is_empty(value) {
+            eq(value, "");
+        }
+        pub fn non_empty(value) {
+            eq(is_empty(value), false);
+        }
+        non_empty("x");
+    "#;
+
+    let compiled = compile_source(source).expect("compile should succeed");
+    assert!(
+        compiled.functions.is_empty(),
+        "rss-defined functions should not be emitted as host imports"
+    );
+
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true)]);
 }
 
 #[test]

@@ -1,4 +1,0 @@
-let base = 7;
-let add = |value| value + base;
-let base = 8;
-print!(add(5));
