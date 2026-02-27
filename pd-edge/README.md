@@ -6,6 +6,7 @@ This proxy has two listeners:
 - Admin endpoint: `127.0.0.1:8081` (default)
 
 The admin endpoint accepts compiled VM bytecode via `PUT /program`.
+`pd-edge` works standalone without `pd-controller`; in that mode you load programs directly through this admin endpoint.
 
 ## Codebase Layout
 
@@ -61,6 +62,16 @@ functions in fixed ABI order and then:
 - `x-vm: allowed` + body `request allowed` when under limit
 - `x-vm: rate-limited` + body `rate limit exceeded` when over limit
 
+## Docker image
+
+Release workflow publishes `fffonion/pd-edge:<tag>` and `fffonion/pd-edge:latest`.
+
+Run standalone edge with published image:
+
+```powershell
+docker run --rm -p 8080:8080 -p 8081:8081 fffonion/pd-edge:latest
+```
+
 ## Run + Upload (PowerShell)
 
 1. Start the proxy:
@@ -94,6 +105,27 @@ cargo run -p pd-edge --example build_sample_program -- examples/sample_proxy_pro
 
 Expected output includes `admin response: 204 No Content`.
 
+### Compile with `pd-vm-run` and upload via Admin API
+
+This path is useful when you want to run `pd-edge` without controller and explicitly manage bytecode artifacts.
+
+1. Emit VMBC bytecode from source:
+
+```powershell
+New-Item -ItemType Directory -Force out | Out-Null
+cargo run -p pd-vm --bin pd-vm-run -- --emit-vmbc out/sample_proxy_program.vmbc examples/sample_proxy_program.rss
+```
+
+2. Upload the compiled VMBC bytes to local admin API:
+
+```powershell
+curl -X PUT "http://127.0.0.1:8081/program" `
+  -H "content-type: application/octet-stream" `
+  --data-binary "@out/sample_proxy_program.vmbc"
+```
+
+Expected response status: `204 No Content`.
+
 3. Hit data plane to verify:
 
 ```powershell
@@ -117,6 +149,8 @@ First 3 responses for the same `x-client-id`:
 ```powershell
 cargo run -p pd-edge -- --data-addr "0.0.0.0:9000" --admin-addr "127.0.0.1:9001" --max-program-bytes "1048576"
 ```
+
+If you do not provide `--control-plane-url`, `pd-edge` stays in standalone mode and only uses local admin APIs.
 
 ### Active Data-Plane Control RPC
 

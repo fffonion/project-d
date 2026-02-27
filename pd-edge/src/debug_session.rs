@@ -6,9 +6,7 @@ use std::{
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-use vm::{
-    DebugCommandBridge, DebugCommandBridgeError, Debugger, Vm, VmResult, VmStatus,
-};
+use vm::{DebugCommandBridge, DebugCommandBridgeError, Debugger, Vm, VmResult, VmStatus};
 
 use crate::{
     control_plane_rpc::{RemoteDebugCommand, RemoteDebugCommandResponse},

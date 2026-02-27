@@ -14,7 +14,7 @@ use uuid::Uuid;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = match parse_cli_args() {
-        Ok(CliAction::Run(cli)) => cli,
+        Ok(CliAction::Run(cli)) => *cli,
         Ok(CliAction::Help) => {
             print_cli_help();
             return Ok(());
@@ -119,7 +119,7 @@ struct CliArgs {
 }
 
 enum CliAction {
-    Run(CliArgs),
+    Run(Box<CliArgs>),
     Help,
     Version,
 }
@@ -189,7 +189,7 @@ fn parse_cli_args() -> Result<CliAction, String> {
             }
         }
     }
-    Ok(CliAction::Run(cli))
+    Ok(CliAction::Run(Box::new(cli)))
 }
 
 fn next_arg_value(
