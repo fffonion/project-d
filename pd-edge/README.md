@@ -112,16 +112,11 @@ First 3 responses for the same `x-client-id`:
 - Header: `x-vm: rate-limited`
 - Body: `rate limit exceeded`
 
-## Optional Env Overrides
+## Optional CLI Overrides
 
 ```powershell
-$env:DATA_ADDR="0.0.0.0:9000"
-$env:ADMIN_ADDR="127.0.0.1:9001"
-$env:MAX_PROGRAM_BYTES="1048576"
-cargo run -p pd-edge
+cargo run -p pd-edge -- --data-addr "0.0.0.0:9000" --admin-addr "127.0.0.1:9001" --max-program-bytes "1048576"
 ```
-
-`CONTROL_ADDR` is still accepted as a legacy fallback, but `ADMIN_ADDR` is preferred.
 
 ### Active Data-Plane Control RPC
 

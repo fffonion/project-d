@@ -6,8 +6,8 @@ use tracing::{info, warn};
 
 use crate::{
     CommandResultPayload, ControlPlaneCommand, EdgeCommandResult, EdgePollRequest,
-    EdgePollResponse, SharedState, StartDebugSessionRequest, apply_program_from_bytes,
-    start_debug_session, stop_debug_session,
+    EdgePollResponse, RemoteDebugCommandResponse, SharedState, StartDebugSessionRequest,
+    apply_program_from_bytes, run_debug_command, start_debug_session, stop_debug_session,
 };
 
 const MIN_POLL_INTERVAL_MS: u64 = 100;
@@ -173,7 +173,6 @@ async fn execute_command(
             }
         }
         ControlPlaneCommand::StartDebugSession {
-            tcp_addr,
             header_name,
             stop_on_entry,
             ..
@@ -183,7 +182,7 @@ async fn execute_command(
             let request = StartDebugSessionRequest {
                 header_name: header_name.clone(),
                 header_value: nonce.clone(),
-                tcp_addr,
+                tcp_addr: None,
                 stop_on_entry: stop_on_entry.unwrap_or(true),
             };
             match start_debug_session(&state.debug_session, request) {
@@ -204,6 +203,29 @@ async fn execute_command(
                 }
             }
         }
+        ControlPlaneCommand::DebugCommand {
+            session_id,
+            command,
+            ..
+        } => match run_debug_command(&state.debug_session, command) {
+            Ok(response) => CommandResultPayload::DebugCommand {
+                session_id: Some(session_id),
+                response: Some(RemoteDebugCommandResponse {
+                    output: response.output,
+                    current_line: response.current_line,
+                    attached: response.attached,
+                }),
+                message: None,
+            },
+            Err(err) => {
+                ok = false;
+                CommandResultPayload::DebugCommand {
+                    session_id: Some(session_id),
+                    response: None,
+                    message: Some(err.to_string()),
+                }
+            }
+        },
         ControlPlaneCommand::StopDebugSession { .. } => {
             let stopped = stop_debug_session(&state.debug_session);
             CommandResultPayload::StopDebugSession { stopped }

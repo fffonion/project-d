@@ -59,6 +59,7 @@ pub struct HealthStatus {
     pub status: String,
     pub program_loaded: bool,
     pub debug_session_active: bool,
+    pub debug_session_attached: bool,
     pub uptime_seconds: u64,
 }
 
@@ -67,6 +68,9 @@ pub struct TelemetrySnapshot {
     pub uptime_seconds: u64,
     pub program_loaded: bool,
     pub debug_session_active: bool,
+    pub debug_session_attached: bool,
+    #[serde(default)]
+    pub debug_session_current_line: Option<u32>,
     pub data_requests_total: u64,
     pub vm_execution_errors_total: u64,
     pub program_apply_success_total: u64,
@@ -172,6 +176,7 @@ impl SharedState {
             status: "ok".to_string(),
             program_loaded,
             debug_session_active: debug_status.active,
+            debug_session_attached: debug_status.attached,
             uptime_seconds: self.runtime_metrics.started_at.elapsed().as_secs(),
         }
     }
@@ -183,6 +188,8 @@ impl SharedState {
             uptime_seconds: self.runtime_metrics.started_at.elapsed().as_secs(),
             program_loaded,
             debug_session_active: debug_status.active,
+            debug_session_attached: debug_status.attached,
+            debug_session_current_line: debug_status.current_line,
             data_requests_total: self
                 .runtime_metrics
                 .data_requests_total
@@ -246,6 +253,11 @@ impl SharedState {
     pub async fn metrics_text(&self) -> String {
         let telemetry = self.telemetry_snapshot().await;
         let debug_active = if telemetry.debug_session_active { 1 } else { 0 };
+        let debug_attached = if telemetry.debug_session_attached {
+            1
+        } else {
+            0
+        };
         let program_loaded = if telemetry.program_loaded { 1 } else { 0 };
 
         format!(
@@ -253,6 +265,7 @@ impl SharedState {
                 "pd_proxy_uptime_seconds {}\n",
                 "pd_proxy_program_loaded {}\n",
                 "pd_proxy_debug_session_active {}\n",
+                "pd_proxy_debug_session_attached {}\n",
                 "pd_proxy_data_requests_total {}\n",
                 "pd_proxy_vm_execution_errors_total {}\n",
                 "pd_proxy_program_apply_success_total {}\n",
@@ -265,6 +278,7 @@ impl SharedState {
             telemetry.uptime_seconds,
             program_loaded,
             debug_active,
+            debug_attached,
             telemetry.data_requests_total,
             telemetry.vm_execution_errors_total,
             telemetry.program_apply_success_total,

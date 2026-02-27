@@ -16,12 +16,12 @@ pub use active_control_plane::{
 };
 pub use control_plane_rpc::{
     CommandResultPayload, ControlPlaneCommand, EdgeCommandResult, EdgePollRequest,
-    EdgePollResponse, EdgeTrafficSample,
+    EdgePollResponse, EdgeTrafficSample, RemoteDebugCommand, RemoteDebugCommandResponse,
 };
 pub use debug_session::{
     DebugSessionError, DebugSessionStatus, SharedDebugSession, StartDebugSessionRequest,
-    debug_session_status, new_debug_session_store, run_vm_with_optional_debugger,
-    start_debug_session, stop_debug_session,
+    debug_session_status, new_debug_session_store, run_debug_command,
+    run_vm_with_optional_debugger, start_debug_session, stop_debug_session,
 };
 pub use host_abi::{
     ProxyVmContext, RateLimiterStore, SharedProxyVmContext, SharedRateLimiter, VmExecutionOutcome,

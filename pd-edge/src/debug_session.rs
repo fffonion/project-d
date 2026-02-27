@@ -1,14 +1,21 @@
 use std::{
-    io,
     sync::{Arc, Mutex, RwLock},
+    time::Duration,
 };
 
 use axum::http::{HeaderMap, HeaderName, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{info, warn};
-use vm::{Debugger, Vm, VmResult, VmStatus};
+use vm::{
+    DebugCommandBridge, DebugCommandBridgeError, Debugger, Vm, VmResult, VmStatus,
+};
 
-use crate::logging::category_debug;
+use crate::{
+    control_plane_rpc::{RemoteDebugCommand, RemoteDebugCommandResponse},
+    logging::category_debug,
+};
+
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub struct DebugSessionStore {
     session: RwLock<Option<Arc<DebugSession>>>,
@@ -20,7 +27,8 @@ pub type SharedDebugSession = Arc<DebugSessionStore>;
 pub struct StartDebugSessionRequest {
     pub header_name: String,
     pub header_value: String,
-    pub tcp_addr: String,
+    #[serde(default)]
+    pub tcp_addr: Option<String>,
     #[serde(default = "default_stop_on_entry")]
     pub stop_on_entry: bool,
 }
@@ -28,6 +36,8 @@ pub struct StartDebugSessionRequest {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DebugSessionStatus {
     pub active: bool,
+    pub attached: bool,
+    pub current_line: Option<u32>,
     pub header_name: Option<String>,
     pub header_value: Option<String>,
     pub tcp_addr: Option<String>,
@@ -39,8 +49,11 @@ pub enum DebugSessionError {
     AlreadyActive,
     InvalidHeaderName,
     EmptyHeaderValue,
-    EmptyTcpAddr,
-    Bind(io::Error),
+    NotActive,
+    NotAttached,
+    CommandTimeout,
+    BridgeClosed,
+    InvalidCommand(String),
 }
 
 impl DebugSessionError {
@@ -49,8 +62,10 @@ impl DebugSessionError {
             DebugSessionError::AlreadyActive => StatusCode::CONFLICT,
             DebugSessionError::InvalidHeaderName
             | DebugSessionError::EmptyHeaderValue
-            | DebugSessionError::EmptyTcpAddr => StatusCode::BAD_REQUEST,
-            DebugSessionError::Bind(_) => StatusCode::BAD_REQUEST,
+            | DebugSessionError::CommandTimeout
+            | DebugSessionError::InvalidCommand(_)
+            | DebugSessionError::BridgeClosed => StatusCode::BAD_REQUEST,
+            DebugSessionError::NotActive | DebugSessionError::NotAttached => StatusCode::CONFLICT,
         }
     }
 }
@@ -61,10 +76,15 @@ impl std::fmt::Display for DebugSessionError {
             DebugSessionError::AlreadyActive => write!(f, "debug session already active"),
             DebugSessionError::InvalidHeaderName => write!(f, "invalid debug header name"),
             DebugSessionError::EmptyHeaderValue => write!(f, "debug header value cannot be empty"),
-            DebugSessionError::EmptyTcpAddr => write!(f, "tcp_addr cannot be empty"),
-            DebugSessionError::Bind(err) => {
-                write!(f, "failed to start debugger tcp listener: {err}")
+            DebugSessionError::NotActive => write!(f, "debug session is not active"),
+            DebugSessionError::NotAttached => {
+                write!(f, "debugger is not attached to a matching request yet")
             }
+            DebugSessionError::CommandTimeout => {
+                write!(f, "timed out waiting for debugger command response")
+            }
+            DebugSessionError::BridgeClosed => write!(f, "debugger bridge closed"),
+            DebugSessionError::InvalidCommand(message) => write!(f, "{message}"),
         }
     }
 }
@@ -88,13 +108,6 @@ pub fn start_debug_session(
         );
         return Err(DebugSessionError::EmptyHeaderValue);
     }
-    if request.tcp_addr.trim().is_empty() {
-        warn!(
-            "{} rejected start request: empty tcp addr",
-            category_debug()
-        );
-        return Err(DebugSessionError::EmptyTcpAddr);
-    }
     let header_name = HeaderName::from_bytes(request.header_name.as_bytes()).map_err(|_| {
         warn!(
             "{} rejected start request: invalid header name",
@@ -112,7 +125,8 @@ pub fn start_debug_session(
         return Err(DebugSessionError::AlreadyActive);
     }
 
-    let mut debugger = Debugger::with_tcp(&request.tcp_addr).map_err(DebugSessionError::Bind)?;
+    let bridge = DebugCommandBridge::new();
+    let mut debugger = Debugger::with_command_bridge(bridge.clone());
     if request.stop_on_entry {
         debugger.stop_on_entry();
     }
@@ -120,18 +134,17 @@ pub fn start_debug_session(
     let session = Arc::new(DebugSession {
         header_name,
         header_value: request.header_value,
-        tcp_addr: request.tcp_addr,
         stop_on_entry: request.stop_on_entry,
         debugger: Mutex::new(debugger),
+        bridge,
     });
     let status = DebugSessionStatus::from_session(&session);
     *guard = Some(session);
     info!(
-        "{} started session header={} value={} tcp_addr={} stop_on_entry={}",
+        "{} started session header={} value={} stop_on_entry={}",
         category_debug(),
         status.header_name.as_deref().unwrap_or(""),
         status.header_value.as_deref().unwrap_or(""),
-        status.tcp_addr.as_deref().unwrap_or(""),
         status.stop_on_entry.unwrap_or(false)
     );
     Ok(status)
@@ -139,13 +152,42 @@ pub fn start_debug_session(
 
 pub fn stop_debug_session(store: &SharedDebugSession) -> bool {
     let mut guard = store.session.write().expect("debug session lock poisoned");
-    let stopped = guard.take().is_some();
-    if stopped {
+    let stopped = guard.take();
+    if let Some(session) = stopped {
+        session.bridge.close();
         info!("{} session stopped", category_debug());
+        true
     } else {
         info!("{} stop requested with no active session", category_debug());
+        false
     }
-    stopped
+}
+
+pub fn run_debug_command(
+    store: &SharedDebugSession,
+    command: RemoteDebugCommand,
+) -> Result<RemoteDebugCommandResponse, DebugSessionError> {
+    let session = {
+        let guard = store.session.read().expect("debug session lock poisoned");
+        guard.clone().ok_or(DebugSessionError::NotActive)?
+    };
+    let (command_text, resume_mode) = debug_command_text(&command)?;
+    let response = session
+        .bridge
+        .execute(command_text.clone(), COMMAND_TIMEOUT)
+        .map_err(map_bridge_error)?;
+    if resume_mode {
+        return Ok(RemoteDebugCommandResponse {
+            output: format!("sent '{command_text}'"),
+            current_line: None,
+            attached: false,
+        });
+    }
+    Ok(RemoteDebugCommandResponse {
+        output: response.output,
+        current_line: response.current_line,
+        attached: response.attached,
+    })
 }
 
 pub fn debug_session_status(store: &SharedDebugSession) -> DebugSessionStatus {
@@ -183,11 +225,18 @@ pub fn run_vm_with_optional_debugger(
         if detached {
             stop_debug_session_if_match(store, &session);
         }
-
         return result;
     }
 
     vm.run()
+}
+
+fn map_bridge_error(error: DebugCommandBridgeError) -> DebugSessionError {
+    match error {
+        DebugCommandBridgeError::NotAttached => DebugSessionError::NotAttached,
+        DebugCommandBridgeError::Timeout => DebugSessionError::CommandTimeout,
+        DebugCommandBridgeError::Closed => DebugSessionError::BridgeClosed,
+    }
 }
 
 fn stop_debug_session_if_match(store: &SharedDebugSession, active: &Arc<DebugSession>) {
@@ -195,6 +244,7 @@ fn stop_debug_session_if_match(store: &SharedDebugSession, active: &Arc<DebugSes
     if let Some(current) = guard.as_ref()
         && Arc::ptr_eq(current, active)
     {
+        current.bridge.close();
         *guard = None;
         info!(
             "{} session removed automatically after debugger detached",
@@ -218,15 +268,39 @@ fn default_stop_on_entry() -> bool {
 struct DebugSession {
     header_name: HeaderName,
     header_value: String,
-    tcp_addr: String,
     stop_on_entry: bool,
     debugger: Mutex<Debugger>,
+    bridge: DebugCommandBridge,
+}
+
+fn debug_command_text(command: &RemoteDebugCommand) -> Result<(String, bool), DebugSessionError> {
+    match command {
+        RemoteDebugCommand::Where => Ok(("where".to_string(), false)),
+        RemoteDebugCommand::Step => Ok(("step".to_string(), true)),
+        RemoteDebugCommand::Next => Ok(("next".to_string(), true)),
+        RemoteDebugCommand::Continue => Ok(("continue".to_string(), true)),
+        RemoteDebugCommand::Out => Ok(("out".to_string(), true)),
+        RemoteDebugCommand::BreakLine { line } => Ok((format!("break line {line}"), false)),
+        RemoteDebugCommand::ClearLine { line } => Ok((format!("clear line {line}"), false)),
+        RemoteDebugCommand::PrintVar { name } => {
+            if name.trim().is_empty() {
+                return Err(DebugSessionError::InvalidCommand(
+                    "variable name cannot be empty".to_string(),
+                ));
+            }
+            Ok((format!("print {}", name.trim()), false))
+        }
+        RemoteDebugCommand::Locals => Ok(("locals".to_string(), false)),
+        RemoteDebugCommand::Stack => Ok(("stack".to_string(), false)),
+    }
 }
 
 impl DebugSessionStatus {
     fn inactive() -> Self {
         Self {
             active: false,
+            attached: false,
+            current_line: None,
             header_name: None,
             header_value: None,
             tcp_addr: None,
@@ -235,11 +309,14 @@ impl DebugSessionStatus {
     }
 
     fn from_session(session: &DebugSession) -> Self {
+        let bridge_status = session.bridge.status();
         Self {
             active: true,
+            attached: bridge_status.attached,
+            current_line: bridge_status.current_line,
             header_name: Some(session.header_name.as_str().to_string()),
             header_value: Some(session.header_value.clone()),
-            tcp_addr: Some(session.tcp_addr.clone()),
+            tcp_addr: None,
             stop_on_entry: Some(session.stop_on_entry),
         }
     }
@@ -254,6 +331,7 @@ mod tests {
         let store = new_debug_session_store();
         let status = debug_session_status(&store);
         assert!(!status.active);
+        assert!(!status.attached);
     }
 
     #[test]
@@ -268,7 +346,7 @@ mod tests {
         let request = StartDebugSessionRequest {
             header_name: "bad header".to_string(),
             header_value: "x".to_string(),
-            tcp_addr: "127.0.0.1:9500".to_string(),
+            tcp_addr: None,
             stop_on_entry: true,
         };
         let err = start_debug_session(&store, request).expect_err("request should be invalid");
@@ -281,7 +359,7 @@ mod tests {
         let request = StartDebugSessionRequest {
             header_name: "x-debug".to_string(),
             header_value: "".to_string(),
-            tcp_addr: "127.0.0.1:9500".to_string(),
+            tcp_addr: None,
             stop_on_entry: true,
         };
         let err = start_debug_session(&store, request).expect_err("request should be invalid");

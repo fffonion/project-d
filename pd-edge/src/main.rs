@@ -33,9 +33,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     init_logging()?;
     info!("{}", binary_version_text());
 
-    let data_addr = parse_addr("DATA_ADDR", "0.0.0.0:8080")?;
-    let admin_addr = parse_admin_addr("127.0.0.1:8081")?;
-    let max_program_bytes = parse_max_program_bytes("MAX_PROGRAM_BYTES", 1024 * 1024)?;
+    let data_addr = if let Some(value) = cli.data_addr {
+        value
+    } else {
+        "0.0.0.0:8080".parse()?
+    };
+    let admin_addr = if let Some(value) = cli.admin_addr {
+        value
+    } else {
+        "127.0.0.1:8081".parse()?
+    };
+    let max_program_bytes = cli.max_program_bytes.unwrap_or(1024 * 1024);
     let active_control_url = cli.control_plane_url.clone();
     let edge_id_path = cli
         .edge_id_path
@@ -97,31 +105,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn parse_addr(key: &str, default: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    let value = env::var(key).unwrap_or_else(|_| default.to_string());
-    Ok(value.parse()?)
-}
-
-fn parse_admin_addr(default: &str) -> Result<SocketAddr, Box<dyn std::error::Error>> {
-    if let Ok(value) = env::var("ADMIN_ADDR") {
-        return Ok(value.parse()?);
-    }
-    if let Ok(value) = env::var("CONTROL_ADDR") {
-        warn!("CONTROL_ADDR is deprecated; use ADMIN_ADDR instead");
-        return Ok(value.parse()?);
-    }
-    Ok(default.parse()?)
-}
-
-fn parse_max_program_bytes(key: &str, default: usize) -> Result<usize, Box<dyn std::error::Error>> {
-    match env::var(key) {
-        Ok(value) => Ok(value.parse()?),
-        Err(_) => Ok(default),
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 struct CliArgs {
+    data_addr: Option<SocketAddr>,
+    admin_addr: Option<SocketAddr>,
+    max_program_bytes: Option<usize>,
     control_plane_url: Option<String>,
     edge_id: Option<String>,
     edge_name: Option<String>,
@@ -146,6 +134,30 @@ fn parse_cli_args() -> Result<CliAction, String> {
             "-V" | "--version" => return Ok(CliAction::Version),
             "--control-plane-url" => {
                 cli.control_plane_url = Some(next_arg_value("--control-plane-url", &mut args)?);
+            }
+            "--data-addr" => {
+                let value = next_arg_value("--data-addr", &mut args)?;
+                cli.data_addr = Some(
+                    value
+                        .parse::<SocketAddr>()
+                        .map_err(|_| format!("invalid --data-addr: {value}"))?,
+                );
+            }
+            "--admin-addr" => {
+                let value = next_arg_value("--admin-addr", &mut args)?;
+                cli.admin_addr = Some(
+                    value
+                        .parse::<SocketAddr>()
+                        .map_err(|_| format!("invalid --admin-addr: {value}"))?,
+                );
+            }
+            "--max-program-bytes" => {
+                let value = next_arg_value("--max-program-bytes", &mut args)?;
+                cli.max_program_bytes = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|_| format!("invalid --max-program-bytes: {value}"))?,
+                );
             }
             "--edge-id" => {
                 cli.edge_id = Some(next_arg_value("--edge-id", &mut args)?);
@@ -197,6 +209,9 @@ fn print_cli_help() {
     eprintln!(concat!(
         "Usage: pd-edge [options]\n\n",
         "Options:\n",
+        "  --data-addr <ADDR>                        Data plane listen address (default: 0.0.0.0:8080)\n",
+        "  --admin-addr <ADDR>                       Admin endpoint listen address (default: 127.0.0.1:8081)\n",
+        "  --max-program-bytes <BYTES>               Max upload/program size in bytes (default: 1048576)\n",
         "  --control-plane-url <URL>                 Enable active control-plane RPC client\n",
         "  --edge-id <UUID>                          Explicit edge UUID used by active control-plane client\n",
         "  --edge-name <NAME>                        Friendly edge name (default: hostname)\n",
@@ -204,10 +219,7 @@ fn print_cli_help() {
         "  --control-plane-poll-interval-ms <MS>     Poll interval for active control-plane client\n",
         "  --control-plane-rpc-timeout-ms <MS>       RPC timeout for active control-plane client\n",
         "  -V, --version                             Show version with git metadata\n",
-        "  -h, --help                                Show this help\n\n",
-        "Address and local admin settings still use env vars:\n",
-        "  DATA_ADDR, ADMIN_ADDR, MAX_PROGRAM_BYTES\n",
-        "  (legacy fallback: CONTROL_ADDR)\n"
+        "  -h, --help                                Show this help\n"
     ));
 }
 

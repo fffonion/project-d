@@ -41,6 +41,11 @@ pub enum ControlPlaneCommand {
         header_name: Option<String>,
         stop_on_entry: Option<bool>,
     },
+    DebugCommand {
+        command_id: String,
+        session_id: String,
+        command: RemoteDebugCommand,
+    },
     StopDebugSession {
         command_id: String,
     },
@@ -64,6 +69,7 @@ impl ControlPlaneCommand {
         match self {
             ControlPlaneCommand::ApplyProgram { command_id, .. }
             | ControlPlaneCommand::StartDebugSession { command_id, .. }
+            | ControlPlaneCommand::DebugCommand { command_id, .. }
             | ControlPlaneCommand::StopDebugSession { command_id }
             | ControlPlaneCommand::GetHealth { command_id }
             | ControlPlaneCommand::GetMetrics { command_id }
@@ -71,6 +77,28 @@ impl ControlPlaneCommand {
             | ControlPlaneCommand::Ping { command_id, .. } => command_id,
         }
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RemoteDebugCommand {
+    Where,
+    Step,
+    Next,
+    Continue,
+    Out,
+    BreakLine { line: u32 },
+    ClearLine { line: u32 },
+    PrintVar { name: String },
+    Locals,
+    Stack,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RemoteDebugCommandResponse {
+    pub output: String,
+    pub current_line: Option<u32>,
+    pub attached: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,6 +123,11 @@ pub enum CommandResultPayload {
         status: Option<DebugSessionStatus>,
         nonce_header_name: Option<String>,
         nonce_header_value: Option<String>,
+        message: Option<String>,
+    },
+    DebugCommand {
+        session_id: Option<String>,
+        response: Option<RemoteDebugCommandResponse>,
         message: Option<String>,
     },
     StopDebugSession {
