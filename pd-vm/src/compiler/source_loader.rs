@@ -1168,8 +1168,29 @@ fn rewrite_imported_call_sites(
 ) -> Result<String, SourcePathError> {
     let mut alias_calls = HashMap::<String, String>::new();
     let mut namespace_calls = HashMap::<String, HashSet<String>>::new();
+    let mut namespace_wildcards = HashSet::<String>::new();
+    let mut prefix_aliases = Vec::<String>::new();
 
     for import in imports {
+        if import.spec == VM_HOST_NAMESPACE_SPEC {
+            match &import.clause {
+                ImportClause::AllPublic => {}
+                ImportClause::Named(named) => {
+                    for binding in named {
+                        if binding.local != binding.imported {
+                            alias_calls.insert(binding.local.clone(), binding.imported.clone());
+                        }
+                    }
+                }
+                ImportClause::Namespace(namespace) => {
+                    namespace_wildcards.insert(namespace.clone());
+                }
+                ImportClause::Prefix(prefix) => {
+                    prefix_aliases.push(prefix.clone());
+                }
+            }
+            continue;
+        }
         if !is_module_specifier(&import.spec) {
             continue;
         }
@@ -1212,7 +1233,14 @@ fn rewrite_imported_call_sites(
         }
     }
 
-    if alias_calls.is_empty() && namespace_calls.is_empty() {
+    prefix_aliases.sort();
+    prefix_aliases.dedup();
+
+    if alias_calls.is_empty()
+        && namespace_calls.is_empty()
+        && namespace_wildcards.is_empty()
+        && prefix_aliases.is_empty()
+    {
         return Ok(source.to_string());
     }
 
@@ -1221,6 +1249,8 @@ fn rewrite_imported_call_sites(
             source,
             &alias_calls,
             &namespace_calls,
+            &namespace_wildcards,
+            &prefix_aliases,
         ))
     } else {
         Ok(rewrite_function_call_paths(
@@ -1228,6 +1258,8 @@ fn rewrite_imported_call_sites(
             flavor,
             &alias_calls,
             &namespace_calls,
+            &namespace_wildcards,
+            &prefix_aliases,
         ))
     }
 }
@@ -1237,6 +1269,8 @@ fn rewrite_function_call_paths(
     flavor: SourceFlavor,
     alias_calls: &HashMap<String, String>,
     namespace_calls: &HashMap<String, HashSet<String>>,
+    namespace_wildcards: &HashSet<String>,
+    prefix_aliases: &[String],
 ) -> String {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
@@ -1315,7 +1349,9 @@ fn rewrite_function_call_paths(
             }
             let ident = &source[start..i];
 
-            if let Some(methods) = namespace_calls.get(ident) {
+            let namespace_methods = namespace_calls.get(ident);
+            let namespace_wildcard = namespace_wildcards.contains(ident);
+            if namespace_methods.is_some() || namespace_wildcard {
                 let mut j = i;
                 while j < bytes.len()
                     && bytes[j].is_ascii_whitespace()
@@ -1369,7 +1405,8 @@ fn rewrite_function_call_paths(
                         }
                         if call_check < bytes.len()
                             && bytes[call_check] == b'('
-                            && methods.contains(member)
+                            && (namespace_wildcard
+                                || namespace_methods.is_some_and(|methods| methods.contains(member)))
                         {
                             out.push_str(member);
                             i = k;
@@ -1394,6 +1431,33 @@ fn rewrite_function_call_paths(
                 }
             }
 
+            let mut rewritten_by_prefix = false;
+            for prefix in prefix_aliases {
+                if !ident.starts_with(prefix) {
+                    continue;
+                }
+                let rem = &ident[prefix.len()..];
+                if rem.is_empty() || !is_valid_ident(rem) {
+                    continue;
+                }
+                let mut j = i;
+                while j < bytes.len()
+                    && bytes[j].is_ascii_whitespace()
+                    && bytes[j] != b'\n'
+                    && bytes[j] != b'\r'
+                {
+                    j += 1;
+                }
+                if j < bytes.len() && bytes[j] == b'(' {
+                    out.push_str(rem);
+                    rewritten_by_prefix = true;
+                    break;
+                }
+            }
+            if rewritten_by_prefix {
+                continue;
+            }
+
             out.push_str(ident);
             continue;
         }
@@ -1409,6 +1473,8 @@ fn rewrite_scheme_call_heads(
     source: &str,
     alias_calls: &HashMap<String, String>,
     namespace_calls: &HashMap<String, HashSet<String>>,
+    namespace_wildcards: &HashSet<String>,
+    prefix_aliases: &[String],
 ) -> String {
     let bytes = source.as_bytes();
     let mut out = String::with_capacity(source.len());
@@ -1488,6 +1554,28 @@ fn rewrite_scheme_call_heads(
                 && entries.contains(member)
             {
                 out.push_str(member);
+                continue;
+            }
+
+            if let Some((namespace, member)) = symbol.split_once('.')
+                && namespace_wildcards.contains(namespace)
+                && !member.is_empty()
+            {
+                out.push_str(member);
+                continue;
+            }
+
+            let mut rewritten_by_prefix = false;
+            for prefix in prefix_aliases {
+                if let Some(rem) = symbol.strip_prefix(prefix)
+                    && !rem.is_empty()
+                {
+                    out.push_str(rem);
+                    rewritten_by_prefix = true;
+                    break;
+                }
+            }
+            if rewritten_by_prefix {
                 continue;
             }
 

@@ -1,4 +1,4 @@
-use super::rss::strings::{contains, equals, is_empty, len, replace, split, trim};
+use super::rss::strings::{contains, equals, is_empty, replace, split, trim};
 
 assert(equals("rustscript", "rustscript"));
 assert(equals("rustscript", "vm") == false);

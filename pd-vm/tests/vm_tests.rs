@@ -468,6 +468,72 @@ fn lua_vm_require_member_alias_host_calls_are_supported() {
 }
 
 #[test]
+fn javascript_vm_namespace_host_calls_are_supported() {
+    let unique = format!(
+        "vm_js_host_namespace_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+    let path = root.join("main.js");
+    std::fs::write(
+        &path,
+        r#"
+        import * as vm from "vm";
+        vm.add_one(41);
+    "#,
+    )
+    .expect("js source should write");
+
+    let compiled = compile_source_file(&path).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
+fn scheme_vm_prefixed_namespace_host_calls_are_supported() {
+    let unique = format!(
+        "vm_scheme_host_namespace_test_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock should be valid")
+            .as_nanos()
+    );
+    let root = std::env::temp_dir().join(unique);
+    std::fs::create_dir_all(&root).expect("temp module root should be created");
+    let path = root.join("main.scm");
+    std::fs::write(
+        &path,
+        r#"
+        (require (prefix-in vm. "vm"))
+        (vm.add_one 41)
+    "#,
+    )
+    .expect("scheme source should write");
+
+    let compiled = compile_source_file(&path).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.bind_function("add_one", Box::new(AddOne));
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_dir(root);
+}
+
+#[test]
 fn host_function_registry_caches_static_function_pointer_plan_across_vms() {
     let source = include_str!("../examples/example.rss");
     let compiled = compile_source(source).expect("compile should succeed");
