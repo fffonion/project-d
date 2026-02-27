@@ -4627,22 +4627,22 @@ fn render_single_block(
             let left = block_value(block, "left", "hello ");
             let right = block_value(block, "right", "world");
             rss.push(format!(
-                "let {var} = concat({}, {});",
+                "let {var} = {} + {};",
                 render_expr_rss(left),
                 render_expr_rss(right)
             ));
             js.push(format!(
-                "let {var} = concat({}, {});",
+                "let {var} = {} + {};",
                 render_expr_js(left),
                 render_expr_js(right)
             ));
             lua.push(format!(
-                "local {var} = concat({}, {})",
+                "local {var} = {} + {}",
                 render_expr_lua(left),
                 render_expr_lua(right)
             ));
             scm.push(format!(
-                "(define {var} (concat {} {}))",
+                "(define {var} (+ {} {}))",
                 render_expr_scheme(left),
                 render_expr_scheme(right)
             ));

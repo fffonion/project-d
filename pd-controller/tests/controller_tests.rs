@@ -568,7 +568,7 @@ async fn ui_render_extended_value_blocks_work_with_flow_graph() {
         .as_str()
         .expect("rustscript source should be a string");
     assert!(
-        rustscript.contains("let joined = concat(first, second);"),
+        rustscript.contains("let joined = first + second;"),
         "expected string concat line, got: {rustscript}"
     );
     assert!(
