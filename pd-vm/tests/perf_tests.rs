@@ -2,8 +2,8 @@ use std::hint::black_box;
 use std::time::Instant;
 
 use vm::{
-    CallOutcome, HostFunction, HostFunctionRegistry, JitConfig, OpCode, Program, Value, Vm,
-    VmStatus, compile_source,
+    CallOutcome, HostFunction, HostFunctionRegistry, JitConfig, OpCode, Program, SourceFlavor,
+    Value, Vm, VmStatus, compile_source, compile_source_with_flavor,
 };
 
 struct PerfNoopHost {
@@ -361,6 +361,111 @@ fn perf_jit_native_reduces_tight_loop_latency() {
         interpreter_median,
         jit_median
     );
+}
+
+#[test]
+#[ignore = "manual run performance test; run explicitly"]
+fn perf_manual_aes_128_cbc_rss_matches_in_interpreter_and_jit() {
+    let source = include_str!("../examples/aes_128_cbc.rss");
+    let compiled = compile_source_with_flavor(source, SourceFlavor::Rss)
+        .expect("aes rss example should compile");
+
+    let expected = vec![
+        Value::Int(0),
+        Value::Int(0x76),
+        Value::Int(0x49),
+        Value::Int(0xAB),
+        Value::Int(0xAC),
+        Value::Int(0x81),
+        Value::Int(0x19),
+        Value::Int(0xB2),
+        Value::Int(0x46),
+        Value::Int(0xCE),
+        Value::Int(0xE9),
+        Value::Int(0x8E),
+        Value::Int(0x9B),
+        Value::Int(0x12),
+        Value::Int(0xE9),
+        Value::Int(0x19),
+        Value::Int(0x7D),
+    ];
+
+    const TRIALS: usize = 7;
+    let mut interpreter_times = Vec::with_capacity(TRIALS);
+    let mut jit_times = Vec::with_capacity(TRIALS);
+    let mut saw_native_exec = false;
+
+    for trial in 0..TRIALS {
+        let mut vm_interpreter = Vm::with_locals(compiled.program.clone(), compiled.locals);
+        vm_interpreter.set_jit_config(JitConfig {
+            enabled: false,
+            hot_loop_threshold: 1,
+            max_trace_len: 16_384,
+        });
+        let interpreter_started = Instant::now();
+        let interpreter_status = vm_interpreter
+            .run()
+            .expect("aes rss example should run in interpreter mode");
+        let interpreter_elapsed = interpreter_started.elapsed();
+        assert_eq!(
+            interpreter_status,
+            VmStatus::Halted,
+            "interpreter should halt on trial {trial}"
+        );
+        assert_eq!(
+            vm_interpreter.stack(),
+            expected.as_slice(),
+            "interpreter result mismatch on trial {trial}"
+        );
+        interpreter_times.push(interpreter_elapsed);
+
+        let mut vm_jit = Vm::with_locals(compiled.program.clone(), compiled.locals);
+        vm_jit.set_jit_config(JitConfig {
+            enabled: true,
+            hot_loop_threshold: 1,
+            max_trace_len: 16_384,
+        });
+        let jit_started = Instant::now();
+        let jit_status = vm_jit
+            .run()
+            .expect("aes rss example should run in jit mode");
+        let jit_elapsed = jit_started.elapsed();
+        assert_eq!(
+            jit_status,
+            VmStatus::Halted,
+            "jit should halt on trial {trial}"
+        );
+        assert_eq!(
+            vm_jit.stack(),
+            expected.as_slice(),
+            "jit result mismatch on trial {trial}"
+        );
+        assert_eq!(
+            vm_jit.stack(),
+            vm_interpreter.stack(),
+            "interpreter/jit stack mismatch on trial {trial}"
+        );
+        jit_times.push(jit_elapsed);
+        saw_native_exec |= vm_jit.jit_native_exec_count() > 0;
+    }
+
+    let interpreter_median = median_duration(&mut interpreter_times);
+    let jit_median = median_duration(&mut jit_times);
+    let speedup =
+        interpreter_median.as_secs_f64() / jit_median.as_secs_f64().max(f64::MIN_POSITIVE);
+    println!(
+        "aes-128-cbc rss latency median: interpreter={}us jit={}us speedup={:.2}x",
+        interpreter_median.as_micros(),
+        jit_median.as_micros(),
+        speedup
+    );
+
+    if native_jit_supported() {
+        assert!(
+            saw_native_exec,
+            "expected at least one native trace execution in jit mode"
+        );
+    }
 }
 
 fn native_jit_supported() -> bool {

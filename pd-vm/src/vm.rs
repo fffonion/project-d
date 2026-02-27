@@ -1,7 +1,20 @@
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::Arc;
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+use std::sync::{Mutex, OnceLock};
 
 #[cfg(any(
-    all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
     all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
 ))]
 mod jit_native;
@@ -432,6 +445,7 @@ enum VmHostFunction {
 
 pub struct Vm {
     program: Program,
+    program_cache_key: u64,
     ip: usize,
     stack: Vec<Value>,
     locals: Vec<Value>,
@@ -458,31 +472,151 @@ enum TraceExecOutcome {
 }
 
 #[cfg(any(
-    all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
     all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
 ))]
 type NativeTraceEntry = unsafe extern "C" fn(*mut Vm) -> i32;
 
 #[cfg(not(any(
-    all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
     all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
 )))]
 type NativeTraceEntry = fn(*mut Vm) -> i32;
 
 struct NativeTrace {
     #[cfg(any(
-        all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+        all(
+            target_arch = "x86_64",
+            any(target_os = "windows", all(unix, not(target_os = "macos")))
+        ),
         all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
     ))]
-    _memory: jit_native::ExecutableMemory,
+    _memory: Arc<jit_native::ExecutableMemory>,
     entry: NativeTraceEntry,
-    code: Vec<u8>,
+    code: Arc<[u8]>,
+}
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct NativeTraceCacheKey {
+    root_ip: usize,
+    terminal: crate::jit::JitTraceTerminal,
+    steps: Vec<crate::jit::TraceStep>,
+}
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+struct NativeTraceCacheEntry {
+    memory: Arc<jit_native::ExecutableMemory>,
+    code: Arc<[u8]>,
+}
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+struct NativeTraceCache {
+    active_program_key: Option<u64>,
+    entries: HashMap<NativeTraceCacheKey, NativeTraceCacheEntry>,
+}
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+static NATIVE_TRACE_CACHE: OnceLock<Mutex<NativeTraceCache>> = OnceLock::new();
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+fn native_trace_cache() -> &'static Mutex<NativeTraceCache> {
+    NATIVE_TRACE_CACHE.get_or_init(|| {
+        Mutex::new(NativeTraceCache {
+            active_program_key: None,
+            entries: HashMap::new(),
+        })
+    })
+}
+
+#[cfg(any(
+    all(
+        target_arch = "x86_64",
+        any(target_os = "windows", all(unix, not(target_os = "macos")))
+    ),
+    all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+))]
+fn native_trace_cache_key(trace: &crate::jit::JitTrace) -> NativeTraceCacheKey {
+    NativeTraceCacheKey {
+        root_ip: trace.root_ip,
+        terminal: trace.terminal.clone(),
+        steps: trace.steps.clone(),
+    }
+}
+
+fn compute_program_cache_key(program: &Program) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    program.code.hash(&mut hasher);
+    for constant in &program.constants {
+        hash_value(constant, &mut hasher);
+    }
+    program.imports.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn hash_value(value: &Value, state: &mut impl Hasher) {
+    match value {
+        Value::Int(value) => {
+            0u8.hash(state);
+            value.hash(state);
+        }
+        Value::Float(value) => {
+            1u8.hash(state);
+            value.to_bits().hash(state);
+        }
+        Value::Bool(value) => {
+            2u8.hash(state);
+            value.hash(state);
+        }
+        Value::String(value) => {
+            3u8.hash(state);
+            value.hash(state);
+        }
+    }
 }
 
 impl Vm {
     pub fn new(program: Program) -> Self {
+        let program_cache_key = compute_program_cache_key(&program);
         Self {
             program,
+            program_cache_key,
             ip: 0,
             stack: Vec::new(),
             locals: Vec::new(),
@@ -498,8 +632,10 @@ impl Vm {
     }
 
     pub fn with_locals(program: Program, local_count: usize) -> Self {
+        let program_cache_key = compute_program_cache_key(&program);
         Self {
             program,
+            program_cache_key,
             ip: 0,
             stack: Vec::new(),
             locals: vec![Value::Int(0); local_count],
@@ -604,7 +740,7 @@ impl Vm {
                     native.code.len()
                 ));
                 out.push_str("    code:");
-                for byte in &native.code {
+                for byte in native.code.iter() {
                     out.push_str(&format!(" {:02X}", byte));
                 }
                 out.push('\n');
@@ -769,7 +905,10 @@ impl Vm {
 
     #[cfg_attr(
         any(
-            all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+            all(
+                target_arch = "x86_64",
+                any(target_os = "windows", all(unix, not(target_os = "macos")))
+            ),
             all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
         ),
         allow(dead_code)
@@ -900,14 +1039,20 @@ impl Vm {
 
     fn execute_jit_entry(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         #[cfg(any(
-            all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+            all(
+                target_arch = "x86_64",
+                any(target_os = "windows", all(unix, not(target_os = "macos")))
+            ),
             all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
         ))]
         {
             self.execute_jit_native(trace_id)
         }
         #[cfg(not(any(
-            all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+            all(
+                target_arch = "x86_64",
+                any(target_os = "windows", all(unix, not(target_os = "macos")))
+            ),
             all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
         )))]
         {
@@ -916,7 +1061,10 @@ impl Vm {
     }
 
     #[cfg(any(
-        all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+        all(
+            target_arch = "x86_64",
+            any(target_os = "windows", all(unix, not(target_os = "macos")))
+        ),
         all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
     ))]
     fn execute_jit_native(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
@@ -951,7 +1099,10 @@ impl Vm {
     }
 
     #[cfg(any(
-        all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))),
+        all(
+            target_arch = "x86_64",
+            any(target_os = "windows", all(unix, not(target_os = "macos")))
+        ),
         all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
     ))]
     fn ensure_native_trace(&mut self, trace_id: usize) -> VmResult<()> {
@@ -962,8 +1113,34 @@ impl Vm {
         let trace = self.jit.trace_clone(trace_id).ok_or_else(|| {
             VmError::JitNative(format!("trace {} missing for native compile", trace_id))
         })?;
-        let code = jit_native::emit_native_trace_bytes(&trace)?;
-        let memory = jit_native::ExecutableMemory::from_code(&code)?;
+        let key = native_trace_cache_key(&trace);
+        let cache = native_trace_cache();
+        let (memory, code) = {
+            let mut guard = cache
+                .lock()
+                .map_err(|_| VmError::JitNative("native trace cache lock poisoned".to_string()))?;
+            if guard.active_program_key != Some(self.program_cache_key) {
+                guard.entries.clear();
+                guard.active_program_key = Some(self.program_cache_key);
+            }
+
+            if let Some(hit) = guard.entries.get(&key) {
+                (Arc::clone(&hit.memory), Arc::clone(&hit.code))
+            } else {
+                let code = Arc::<[u8]>::from(
+                    jit_native::emit_native_trace_bytes(&trace)?.into_boxed_slice(),
+                );
+                let memory = Arc::new(jit_native::ExecutableMemory::from_code(code.as_ref())?);
+                guard.entries.insert(
+                    key,
+                    NativeTraceCacheEntry {
+                        memory: Arc::clone(&memory),
+                        code: Arc::clone(&code),
+                    },
+                );
+                (memory, code)
+            }
+        };
         let entry = unsafe { std::mem::transmute::<*const u8, NativeTraceEntry>(memory.ptr) };
         self.native_traces.insert(
             trace_id,
@@ -1234,5 +1411,114 @@ impl Vm {
             .get(index as usize)
             .copied()
             .ok_or(VmError::InvalidCall(index))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[cfg(any(
+        all(
+            target_arch = "x86_64",
+            any(target_os = "windows", all(unix, not(target_os = "macos")))
+        ),
+        all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos"))
+    ))]
+    fn native_trace_cache_resets_when_program_changes() {
+        {
+            let mut guard = native_trace_cache()
+                .lock()
+                .expect("native trace cache lock should succeed");
+            guard.entries.clear();
+            guard.active_program_key = None;
+        }
+
+        let source_one = r#"
+            let i = 0;
+            while i < 8 {
+                i = i + 1;
+            }
+            let j = 0;
+            while j < 8 {
+                j = j + 1;
+            }
+            i + j;
+        "#;
+        let source_two = r#"
+            let k = 0;
+            while k < 8 {
+                k = k + 1;
+            }
+            k;
+        "#;
+
+        let compiled_one = crate::compile_source(source_one).expect("source one should compile");
+        let compiled_two = crate::compile_source(source_two).expect("source two should compile");
+
+        let mut vm_one = Vm::with_locals(compiled_one.program, compiled_one.locals);
+        vm_one.set_jit_config(crate::jit::JitConfig {
+            enabled: true,
+            hot_loop_threshold: 1,
+            max_trace_len: 512,
+        });
+        let status_one = vm_one.run().expect("first vm should run");
+        assert_eq!(status_one, VmStatus::Halted);
+        let vm_one_trace_count = vm_one.jit_native_trace_count();
+        assert!(
+            vm_one_trace_count > 0,
+            "first vm should produce native traces"
+        );
+
+        let (cache_program_after_one, cache_entries_after_one) = {
+            let guard = native_trace_cache()
+                .lock()
+                .expect("native trace cache lock should succeed");
+            (guard.active_program_key, guard.entries.len())
+        };
+        assert_eq!(
+            cache_program_after_one,
+            Some(vm_one.program_cache_key),
+            "cache should be keyed to first program after first run"
+        );
+        assert_eq!(
+            cache_entries_after_one, vm_one_trace_count,
+            "cache entry count should match first program traces"
+        );
+
+        let mut vm_two = Vm::with_locals(compiled_two.program, compiled_two.locals);
+        vm_two.set_jit_config(crate::jit::JitConfig {
+            enabled: true,
+            hot_loop_threshold: 1,
+            max_trace_len: 512,
+        });
+        assert_ne!(
+            vm_one.program_cache_key, vm_two.program_cache_key,
+            "test programs should have different cache keys"
+        );
+        let status_two = vm_two.run().expect("second vm should run");
+        assert_eq!(status_two, VmStatus::Halted);
+        let vm_two_trace_count = vm_two.jit_native_trace_count();
+        assert!(
+            vm_two_trace_count > 0,
+            "second vm should produce native traces"
+        );
+
+        let (cache_program_after_two, cache_entries_after_two) = {
+            let guard = native_trace_cache()
+                .lock()
+                .expect("native trace cache lock should succeed");
+            (guard.active_program_key, guard.entries.len())
+        };
+        assert_eq!(
+            cache_program_after_two,
+            Some(vm_two.program_cache_key),
+            "cache should switch to second program key"
+        );
+        assert_eq!(
+            cache_entries_after_two, vm_two_trace_count,
+            "cache should only contain traces from the active program"
+        );
     }
 }

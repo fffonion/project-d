@@ -122,19 +122,35 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Add => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Add)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Add,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Sub => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Sub)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Sub,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Mul => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Mul)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Mul,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Div => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Div)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Div,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Shl => {
@@ -154,11 +170,19 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Clt => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Clt)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Clt,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Cgt => {
-                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Cgt)?;
+                emit_native_step_binary_numeric_inline(
+                    &mut code,
+                    layout,
+                    NativeBinaryNumericOp::Cgt,
+                )?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Pop => {
@@ -186,14 +210,16 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::GuardFalse { exit_ip } => {
-                let exit_ip = u64::try_from(*exit_ip)
-                    .map_err(|_| VmError::JitNative("guard exit ip exceeds 64-bit range".to_string()))?;
+                let exit_ip = u64::try_from(*exit_ip).map_err(|_| {
+                    VmError::JitNative("guard exit ip exceeds 64-bit range".to_string())
+                })?;
                 emit_native_step_guard_false_inline(&mut code, layout, exit_ip)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::JumpToRoot => {
-                let root_ip = u64::try_from(trace.root_ip)
-                    .map_err(|_| VmError::JitNative("trace root ip exceeds 64-bit range".to_string()))?;
+                let root_ip = u64::try_from(trace.root_ip).map_err(|_| {
+                    VmError::JitNative("trace root ip exceeds 64-bit range".to_string())
+                })?;
                 emit_native_step_jump_to_root_inline(&mut code, layout, root_ip)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
@@ -285,10 +311,18 @@ fn emit_native_step_binary_numeric_inline(
     emit_add_reg(code, 12, 10, 11); // lhs ptr
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let lhs_not_int = emit_b_cond_placeholder(code, Cond::Ne);
     emit_load_tag_w_from_ptr(code, 17, 13, layout.value)?;
-    emit_cmp_imm(code, 17, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        17,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let rhs_not_int = emit_b_cond_placeholder(code, Cond::Ne);
 
     emit_ldr_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
@@ -357,9 +391,17 @@ fn emit_native_step_binary_numeric_inline(
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
     emit_load_tag_w_from_ptr(code, 17, 13, layout.value)?;
 
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let lhs_is_int = emit_b_cond_placeholder(code, Cond::Eq);
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF),
+    )?;
     let lhs_not_float = emit_b_cond_placeholder(code, Cond::Ne);
     emit_ldr_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
     let lhs_ready_branch = emit_b_placeholder(code);
@@ -370,9 +412,17 @@ fn emit_native_step_binary_numeric_inline(
     patch_b_cond_rel19(code, lhs_is_int, lhs_int)?;
     patch_b_rel26(code, lhs_ready_branch, lhs_ready)?;
 
-    emit_cmp_imm(code, 17, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        17,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let rhs_is_int = emit_b_cond_placeholder(code, Cond::Eq);
-    emit_cmp_imm(code, 17, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        17,
+        u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF),
+    )?;
     let rhs_not_float = emit_b_cond_placeholder(code, Cond::Ne);
     emit_ldr_d_disp(code, 1, 13, layout.value.float_payload_offset)?;
     let rhs_ready_branch = emit_b_placeholder(code);
@@ -473,7 +523,11 @@ fn emit_native_step_neg_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     emit_add_reg(code, 12, 10, 11);
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let not_int = emit_b_cond_placeholder(code, Cond::Ne);
 
     emit_ldr_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
@@ -487,7 +541,11 @@ fn emit_native_step_neg_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     patch_b_cond_rel19(code, not_int, float_check)?;
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF),
+    )?;
     let not_float = emit_b_cond_placeholder(code, Cond::Ne);
     emit_ldr_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
     emit_fneg_d(code, 0, 0);
@@ -528,10 +586,18 @@ fn emit_native_step_shift_inline(
     emit_add_reg(code, 12, 10, 11); // lhs
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let lhs_not_int = emit_b_cond_placeholder(code, Cond::Ne);
     emit_load_tag_w_from_ptr(code, 17, 13, layout.value)?;
-    emit_cmp_imm(code, 17, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        17,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let rhs_not_int = emit_b_cond_placeholder(code, Cond::Ne);
 
     emit_ldr_x_disp(code, 15, 13, layout.value.int_payload_offset)?; // rhs shift amount
@@ -581,7 +647,11 @@ fn emit_native_step_pop_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     emit_add_reg(code, 12, 10, 11);
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let is_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_sub_imm(code, 9, 9, 1);
@@ -618,7 +688,11 @@ fn emit_native_step_dup_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     emit_add_reg(code, 13, 10, 11); // src top
 
     emit_load_tag_w_from_ptr(code, 16, 13, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let src_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_mov_imm64(code, 11, layout.value.size as u64);
@@ -676,7 +750,11 @@ fn emit_native_step_ldc_inline(
     emit_add_reg(code, 13, 10, 11); // src const value
 
     emit_load_tag_w_from_ptr(code, 16, 13, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let src_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_ldr_x_disp(code, 10, VM_REG, stack_ptr_offset)?;
@@ -729,7 +807,11 @@ fn emit_native_step_ldloc_inline(
     emit_add_reg(code, 13, 10, 11); // src local
 
     emit_load_tag_w_from_ptr(code, 16, 13, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let src_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_ldr_x_disp(code, 10, VM_REG, stack_ptr_offset)?;
@@ -780,7 +862,11 @@ fn emit_native_step_stloc_inline(
     emit_add_reg(code, 13, 10, 11); // src top
 
     emit_load_tag_w_from_ptr(code, 16, 13, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let src_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_ldr_x_disp(code, 10, VM_REG, locals_ptr_offset)?;
@@ -790,7 +876,11 @@ fn emit_native_step_stloc_inline(
     emit_add_reg(code, 12, 10, 11); // dst local
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let dst_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_copy_value_ptr_to_ptr(code, layout.value, 13, 12)?;
@@ -830,17 +920,33 @@ fn emit_native_step_ceq_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
     emit_load_tag_w_from_ptr(code, 17, 13, layout.value)?;
 
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let lhs_string = emit_b_cond_placeholder(code, Cond::Eq);
-    emit_cmp_imm(code, 17, u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        17,
+        u16::try_from(layout.value.string_tag).unwrap_or(0xFFFF),
+    )?;
     let rhs_string = emit_b_cond_placeholder(code, Cond::Eq);
 
     emit_cmp_w_reg(code, 16, 17);
     let tags_not_equal = emit_b_cond_placeholder(code, Cond::Ne);
 
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF),
+    )?;
     let tag_is_int = emit_b_cond_placeholder(code, Cond::Eq);
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.bool_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.bool_tag).unwrap_or(0xFFFF),
+    )?;
     let tag_is_bool = emit_b_cond_placeholder(code, Cond::Eq);
     let unknown_tag = emit_b_placeholder(code);
 
@@ -912,7 +1018,11 @@ fn emit_native_step_guard_false_inline(
     emit_add_reg(code, 12, 10, 11);
 
     emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
-    emit_cmp_imm(code, 16, u16::try_from(layout.value.bool_tag).unwrap_or(0xFFFF))?;
+    emit_cmp_imm(
+        code,
+        16,
+        u16::try_from(layout.value.bool_tag).unwrap_or(0xFFFF),
+    )?;
     let bad_type = emit_b_cond_placeholder(code, Cond::Ne);
 
     emit_ldr_b_disp(code, 14, 12, layout.value.bool_payload_offset)?;
@@ -965,8 +1075,9 @@ fn emit_native_step_call_inline(
     let call_ip = u64::try_from(call_ip)
         .map_err(|_| VmError::JitNative("trace call_ip exceeds 64-bit range".to_string()))?;
     let helper_addr = jit_native_call_bridge as *const () as usize;
-    let helper_addr = u64::try_from(helper_addr)
-        .map_err(|_| VmError::JitNative("native helper pointer exceeds 64-bit range".to_string()))?;
+    let helper_addr = u64::try_from(helper_addr).map_err(|_| {
+        VmError::JitNative("native helper pointer exceeds 64-bit range".to_string())
+    })?;
 
     emit_mov_reg(code, 0, VM_REG);
     emit_mov_imm64(code, 1, u64::from(index));
@@ -1023,7 +1134,12 @@ fn emit_load_tag_w_from_ptr(
     }
 }
 
-fn emit_store_tag_ptr(code: &mut Vec<u8>, ptr_x: u8, value_layout: ValueLayout, tag: u32) -> VmResult<()> {
+fn emit_store_tag_ptr(
+    code: &mut Vec<u8>,
+    ptr_x: u8,
+    value_layout: ValueLayout,
+    tag: u32,
+) -> VmResult<()> {
     match value_layout.tag_size {
         1 => {
             let v = u8::try_from(tag).map_err(|_| {
@@ -1235,61 +1351,91 @@ fn encode_imm12_scaled(offset: i32, scale: i32, label: &str) -> VmResult<u32> {
 }
 
 fn emit_ldr_x_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xF9400000_u32 | encode_imm12_scaled(offset, 3, "ldr x")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0xF9400000_u32
+        | encode_imm12_scaled(offset, 3, "ldr x")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_str_x_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xF9000000_u32 | encode_imm12_scaled(offset, 3, "str x")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0xF9000000_u32
+        | encode_imm12_scaled(offset, 3, "str x")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_ldr_w_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xB9400000_u32 | encode_imm12_scaled(offset, 2, "ldr w")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0xB9400000_u32
+        | encode_imm12_scaled(offset, 2, "ldr w")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_str_w_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xB9000000_u32 | encode_imm12_scaled(offset, 2, "str w")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0xB9000000_u32
+        | encode_imm12_scaled(offset, 2, "str w")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_ldr_h_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0x79400000_u32 | encode_imm12_scaled(offset, 1, "ldr h")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0x79400000_u32
+        | encode_imm12_scaled(offset, 1, "ldr h")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_str_h_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0x79000000_u32 | encode_imm12_scaled(offset, 1, "str h")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0x79000000_u32
+        | encode_imm12_scaled(offset, 1, "str h")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_ldr_b_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0x39400000_u32 | encode_imm12_scaled(offset, 0, "ldr b")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0x39400000_u32
+        | encode_imm12_scaled(offset, 0, "ldr b")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_str_b_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0x39000000_u32 | encode_imm12_scaled(offset, 0, "str b")? | ((rn as u32) << 5) | (rt as u32);
+    let insn = 0x39000000_u32
+        | encode_imm12_scaled(offset, 0, "str b")?
+        | ((rn as u32) << 5)
+        | (rt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_ldr_d_imm12(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xFD400000_u32 | encode_imm12_scaled(offset, 3, "ldr d")? | ((rn as u32) << 5) | (vt as u32);
+    let insn = 0xFD400000_u32
+        | encode_imm12_scaled(offset, 3, "ldr d")?
+        | ((rn as u32) << 5)
+        | (vt as u32);
     emit_u32(code, insn);
     Ok(())
 }
 
 fn emit_str_d_imm12(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
-    let insn = 0xFD000000_u32 | encode_imm12_scaled(offset, 3, "str d")? | ((rn as u32) << 5) | (vt as u32);
+    let insn = 0xFD000000_u32
+        | encode_imm12_scaled(offset, 3, "str d")?
+        | ((rn as u32) << 5)
+        | (vt as u32);
     emit_u32(code, insn);
     Ok(())
 }
@@ -1704,15 +1850,27 @@ fn usize_to_i32(value: usize, context: &str) -> VmResult<i32> {
 }
 
 fn vec_ptr_disp(vec_base_offset: i32, vec_layout: VecLayout) -> VmResult<i32> {
-    checked_add_i32(vec_base_offset, vec_layout.ptr_offset, "vec ptr offset overflow")
+    checked_add_i32(
+        vec_base_offset,
+        vec_layout.ptr_offset,
+        "vec ptr offset overflow",
+    )
 }
 
 fn vec_len_disp(vec_base_offset: i32, vec_layout: VecLayout) -> VmResult<i32> {
-    checked_add_i32(vec_base_offset, vec_layout.len_offset, "vec len offset overflow")
+    checked_add_i32(
+        vec_base_offset,
+        vec_layout.len_offset,
+        "vec len offset overflow",
+    )
 }
 
 fn vec_cap_disp(vec_base_offset: i32, vec_layout: VecLayout) -> VmResult<i32> {
-    checked_add_i32(vec_base_offset, vec_layout.cap_offset, "vec cap offset overflow")
+    checked_add_i32(
+        vec_base_offset,
+        vec_layout.cap_offset,
+        "vec cap offset overflow",
+    )
 }
 
 thread_local! {
@@ -1837,7 +1995,10 @@ fn write_machine_code(ptr: *mut u8, code: &[u8]) -> VmResult<()> {
     #[cfg(target_os = "linux")]
     unsafe {
         std::ptr::copy_nonoverlapping(code.as_ptr(), ptr, code.len());
-        __clear_cache(ptr as *mut libc::c_char, ptr.add(code.len()) as *mut libc::c_char);
+        __clear_cache(
+            ptr as *mut libc::c_char,
+            ptr.add(code.len()) as *mut libc::c_char,
+        );
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1922,7 +2083,10 @@ mod tests {
         Ok(status)
     }
 
-    fn execute_trace_with_entry(vm: &mut Vm, trace: JitTrace) -> VmResult<(i32, BackendExecutableMemory)> {
+    fn execute_trace_with_entry(
+        vm: &mut Vm,
+        trace: JitTrace,
+    ) -> VmResult<(i32, BackendExecutableMemory)> {
         let code = emit_native_trace_bytes(&trace)?;
         let memory = BackendExecutableMemory::from_code(&code)?;
         let entry = unsafe { std::mem::transmute::<*mut u8, NativeEntry>(memory.ptr) };
@@ -2027,7 +2191,9 @@ mod tests {
         let code = emit_native_trace_bytes(&trace).expect("trace should compile");
         let call_count = code
             .chunks_exact(4)
-            .filter(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 0xD63F0200)
+            .filter(|chunk| {
+                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 0xD63F0200
+            })
             .count();
         assert_eq!(call_count, 0, "add should not emit helper calls");
     }
@@ -2042,7 +2208,9 @@ mod tests {
         let code = emit_native_trace_bytes(&trace).expect("trace should compile");
         let call_count = code
             .chunks_exact(4)
-            .filter(|chunk| u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 0xD63F0200)
+            .filter(|chunk| {
+                u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) == 0xD63F0200
+            })
             .count();
         assert!(call_count >= 1, "call step should emit helper call");
     }

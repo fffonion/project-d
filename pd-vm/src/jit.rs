@@ -27,7 +27,7 @@ fn native_jit_supported() -> bool {
             && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum JitTraceTerminal {
     LoopBack,
     Halt,
@@ -76,7 +76,7 @@ impl JitNyiReason {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum TraceStep {
     Nop,
     Ldc(u32),
