@@ -171,6 +171,7 @@ pub enum Expr {
     Mul(Box<Expr>, Box<Expr>),
     Div(Box<Expr>, Box<Expr>),
     Neg(Box<Expr>),
+    Not(Box<Expr>),
     Eq(Box<Expr>, Box<Expr>),
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
@@ -630,6 +631,11 @@ impl Compiler {
             Expr::Neg(inner) => {
                 self.compile_expr(inner)?;
                 self.assembler.neg();
+            }
+            Expr::Not(inner) => {
+                self.compile_expr(inner)?;
+                self.assembler.push_const(Value::Bool(false));
+                self.assembler.ceq();
             }
             Expr::Eq(lhs, rhs) => {
                 self.compile_expr(lhs)?;

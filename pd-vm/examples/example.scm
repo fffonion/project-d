@@ -5,6 +5,6 @@
   (set! total (+ total 1))
   (set! i (+ i 1)))
 
-(if (> total 2)
-    (print (add_one 5))
-    (print 0))
+(if (/= total 3)
+    (print 0)
+    (print (add_one 5)))

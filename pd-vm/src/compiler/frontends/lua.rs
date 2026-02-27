@@ -28,7 +28,10 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         let trimmed = rewritten.trim();
 
         if let Some(rest) = trimmed.strip_prefix("local ") {
-            out.push(format!("let {};", rest.trim().trim_end_matches(';').trim()));
+            out.push(format!(
+                "let {};",
+                rewrite_lua_expr(rest.trim().trim_end_matches(';').trim())
+            ));
             continue;
         }
 
@@ -50,7 +53,7 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("if ")
             && let Some(condition) = rest.strip_suffix(" then")
         {
-            out.push(format!("if {} {{", condition.trim()));
+            out.push(format!("if {} {{", rewrite_lua_expr(condition.trim())));
             blocks.push(LuaBlock::If);
             continue;
         }
@@ -58,7 +61,7 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         if let Some(rest) = trimmed.strip_prefix("while ")
             && let Some(condition) = rest.strip_suffix(" do")
         {
-            out.push(format!("while {} {{", condition.trim()));
+            out.push(format!("while {} {{", rewrite_lua_expr(condition.trim())));
             blocks.push(LuaBlock::While);
             continue;
         }
@@ -91,9 +94,9 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
                         .to_string(),
                 });
             }
-            let start_expr = parts[0].trim();
-            let end_expr = parts[1].trim();
-            let step_expr = parts.get(2).map(|s| s.trim()).unwrap_or("1");
+            let start_expr = rewrite_lua_expr(parts[0].trim());
+            let end_expr = rewrite_lua_expr(parts[1].trim());
+            let step_expr = rewrite_lua_expr(parts.get(2).map(|s| s.trim()).unwrap_or("1"));
             if step_expr.starts_with('-') {
                 return Err(ParseError {
                     line: line_no,
@@ -104,6 +107,19 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
                 "for (let {name} = {start_expr}; {name} < (({end_expr}) + 1); {name} = {name} + ({step_expr})) {{"
             ));
             blocks.push(LuaBlock::For);
+            continue;
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("elseif ")
+            && let Some(condition) = rest.strip_suffix(" then")
+        {
+            if !matches!(blocks.last(), Some(LuaBlock::If)) {
+                return Err(ParseError {
+                    line: line_no,
+                    message: "lua 'elseif' without matching 'if'".to_string(),
+                });
+            }
+            out.push(format!("}} else if {} {{", rewrite_lua_expr(condition.trim())));
             continue;
         }
 
@@ -141,11 +157,17 @@ pub(super) fn lower(source: &str) -> Result<String, ParseError> {
         }
 
         if let Some(rest) = trimmed.strip_prefix("return ") {
-            out.push(format!("{};", rest.trim().trim_end_matches(';').trim()));
+            out.push(format!(
+                "{};",
+                rewrite_lua_expr(rest.trim().trim_end_matches(';').trim())
+            ));
             continue;
         }
 
-        out.push(format!("{};", trimmed.trim_end_matches(';')));
+        out.push(format!(
+            "{};",
+            rewrite_lua_expr(trimmed.trim_end_matches(';'))
+        ));
     }
 
     if !blocks.is_empty() {
@@ -249,6 +271,64 @@ fn rewrite_lua_inline_function_literal(line: &str, line_no: usize) -> Result<Str
     }
 
     Ok(format!("{prefix}|{params}| {body}"))
+}
+
+fn rewrite_lua_expr(expr: &str) -> String {
+    let bytes = expr.as_bytes();
+    let mut out = String::with_capacity(expr.len());
+    let mut i = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    while i < bytes.len() {
+        let b = bytes[i];
+        if in_string {
+            out.push(b as char);
+            if escaped {
+                escaped = false;
+            } else if b == b'\\' {
+                escaped = true;
+            } else if b == b'"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+
+        if b == b'"' {
+            out.push('"');
+            in_string = true;
+            i += 1;
+            continue;
+        }
+
+        if b == b'~' && i + 1 < bytes.len() && bytes[i + 1] == b'=' {
+            out.push_str("!=");
+            i += 2;
+            continue;
+        }
+
+        let ch = b as char;
+        if is_ident_start(ch) {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && is_ident_continue(bytes[i] as char) {
+                i += 1;
+            }
+            let ident = &expr[start..i];
+            if ident == "not" {
+                out.push('!');
+            } else {
+                out.push_str(ident);
+            }
+            continue;
+        }
+
+        out.push(ch);
+        i += 1;
+    }
+
+    out
 }
 
 fn split_top_level_csv(input: &str) -> Vec<String> {

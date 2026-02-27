@@ -7,10 +7,10 @@ for (let i = 0; i < 4; i = i + 1) {
     total = total + i;
 }
 
-if (string.non_empty("javascript")) {
-    total = add_one(total);
-} else {
+if (!string.non_empty("javascript")) {
     total = 0;
+} else {
+    total = add_one(total);
 }
 
 let base = 7;

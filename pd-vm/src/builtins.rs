@@ -17,6 +17,7 @@ pub(crate) enum BuiltinFunction {
     IoFlush = 13,
     IoClose = 14,
     IoExists = 15,
+    Assert = 16,
 }
 
 pub(crate) const BUILTIN_CALL_BASE: u16 = 0xFFF0;
@@ -41,6 +42,7 @@ impl BuiltinFunction {
             BuiltinFunction::IoFlush => "io_flush",
             BuiltinFunction::IoClose => "io_close",
             BuiltinFunction::IoExists => "io_exists",
+            BuiltinFunction::Assert => "assert",
         }
     }
 
@@ -62,14 +64,21 @@ impl BuiltinFunction {
             BuiltinFunction::IoFlush => 1,
             BuiltinFunction::IoClose => 1,
             BuiltinFunction::IoExists => 1,
+            BuiltinFunction::Assert => 1,
         }
     }
 
     pub(crate) fn call_index(self) -> u16 {
-        BUILTIN_CALL_BASE + self as u16
+        match self {
+            BuiltinFunction::Assert => BUILTIN_CALL_BASE - 1,
+            _ => BUILTIN_CALL_BASE + self as u16,
+        }
     }
 
     pub(crate) fn from_call_index(index: u16) -> Option<Self> {
+        if index == BUILTIN_CALL_BASE - 1 {
+            return Some(BuiltinFunction::Assert);
+        }
         let offset = index.checked_sub(BUILTIN_CALL_BASE)?;
         if offset >= BUILTIN_CALL_COUNT {
             return None;
@@ -113,6 +122,7 @@ impl BuiltinFunction {
             "io_flush" => Some(BuiltinFunction::IoFlush),
             "io_close" => Some(BuiltinFunction::IoClose),
             "io_exists" => Some(BuiltinFunction::IoExists),
+            "assert" | "intrinsic_assert" => Some(BuiltinFunction::Assert),
             _ => None,
         }
     }

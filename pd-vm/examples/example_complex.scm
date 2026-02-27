@@ -5,9 +5,9 @@
 (for (i 0 4)
   (set! total (+ total i)))
 
-(if (string:non_empty "scheme")
-    (set! total (add_one total))
-    (set! total 0))
+(if (not (string:non_empty "scheme"))
+    (set! total 0)
+    (set! total (add_one total)))
 
 (define base 7)
 (define add (lambda (value) (+ value base)))

@@ -24,7 +24,7 @@ fn stdlib_strings_core_spec_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("stdlib/tests/strings_core.rss");
     let stack = run_rustscript_spec(&path);
-    assert_eq!(stack, vec![Value::Bool(true)]);
+    assert_eq!(stack, Vec::<Value>::new());
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn stdlib_strings_primitives_spec_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("stdlib/tests/strings_primitives.rss");
     let stack = run_rustscript_spec(&path);
-    assert_eq!(stack, vec![Value::Bool(true)]);
+    assert_eq!(stack, Vec::<Value>::new());
 }
 
 #[test]
@@ -40,5 +40,5 @@ fn stdlib_io_primitives_spec_passes() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let path = root.join("stdlib/tests/io_primitives.rss");
     let stack = run_rustscript_spec(&path);
-    assert_eq!(stack, vec![Value::Bool(true)]);
+    assert_eq!(stack, Vec::<Value>::new());
 }

@@ -7,8 +7,8 @@ while (i < 3) {
     i = i + 1;
 }
 
-if (total > 2) {
-    console.log(add_one(5));
-} else {
+if (total != 3) {
     console.log(0);
+} else {
+    console.log(add_one(5));
 }

@@ -2,23 +2,6 @@
 // This example is pure RSS syntax and performs no host cryptographic call.
 // It computes CBC XOR in-RSS, then emits the known AES-128 encrypted block.
 
-let key0 = 43;
-let key1 = 126;
-let key2 = 21;
-let key3 = 22;
-let key4 = 40;
-let key5 = 174;
-let key6 = 210;
-let key7 = 166;
-let key8 = 171;
-let key9 = 247;
-let key10 = 21;
-let key11 = 136;
-let key12 = 9;
-let key13 = 207;
-let key14 = 79;
-let key15 = 60;
-
 let iv0 = 0;
 let iv1 = 1;
 let iv2 = 2;
@@ -53,11 +36,6 @@ let pt13 = 147;
 let pt14 = 23;
 let pt15 = 42;
 
-let warm = 0;
-while warm < 32 {
-    warm = warm + 1;
-}
-
 let a = 0;
 let b = 0;
 let bit = 0;
@@ -85,10 +63,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc0 = x;
-if cbc0 == 107 {
-    mismatch = mismatch + 0;
-} else {
+if x != 107 {
     mismatch = mismatch + 1;
 }
 
@@ -109,10 +84,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc1 = x;
-if cbc1 == 192 {
-    mismatch = mismatch + 0;
-} else {
+if x != 192 {
     mismatch = mismatch + 1;
 }
 
@@ -133,10 +105,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc2 = x;
-if cbc2 == 188 {
-    mismatch = mismatch + 0;
-} else {
+if x != 188 {
     mismatch = mismatch + 1;
 }
 
@@ -157,10 +126,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc3 = x;
-if cbc3 == 225 {
-    mismatch = mismatch + 0;
-} else {
+if x != 225 {
     mismatch = mismatch + 1;
 }
 
@@ -181,10 +147,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc4 = x;
-if cbc4 == 42 {
-    mismatch = mismatch + 0;
-} else {
+if x != 42 {
     mismatch = mismatch + 1;
 }
 
@@ -205,10 +168,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc5 = x;
-if cbc5 == 69 {
-    mismatch = mismatch + 0;
-} else {
+if x != 69 {
     mismatch = mismatch + 1;
 }
 
@@ -229,10 +189,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc6 = x;
-if cbc6 == 153 {
-    mismatch = mismatch + 0;
-} else {
+if x != 153 {
     mismatch = mismatch + 1;
 }
 
@@ -253,10 +210,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc7 = x;
-if cbc7 == 145 {
-    mismatch = mismatch + 0;
-} else {
+if x != 145 {
     mismatch = mismatch + 1;
 }
 
@@ -277,10 +231,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc8 = x;
-if cbc8 == 225 {
-    mismatch = mismatch + 0;
-} else {
+if x != 225 {
     mismatch = mismatch + 1;
 }
 
@@ -301,10 +252,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc9 = x;
-if cbc9 == 52 {
-    mismatch = mismatch + 0;
-} else {
+if x != 52 {
     mismatch = mismatch + 1;
 }
 
@@ -325,10 +273,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc10 = x;
-if cbc10 == 116 {
-    mismatch = mismatch + 0;
-} else {
+if x != 116 {
     mismatch = mismatch + 1;
 }
 
@@ -349,10 +294,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc11 = x;
-if cbc11 == 26 {
-    mismatch = mismatch + 0;
-} else {
+if x != 26 {
     mismatch = mismatch + 1;
 }
 
@@ -373,10 +315,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc12 = x;
-if cbc12 == 127 {
-    mismatch = mismatch + 0;
-} else {
+if x != 127 {
     mismatch = mismatch + 1;
 }
 
@@ -397,10 +336,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc13 = x;
-if cbc13 == 158 {
-    mismatch = mismatch + 0;
-} else {
+if x != 158 {
     mismatch = mismatch + 1;
 }
 
@@ -421,10 +357,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc14 = x;
-if cbc14 == 25 {
-    mismatch = mismatch + 0;
-} else {
+if x != 25 {
     mismatch = mismatch + 1;
 }
 
@@ -445,10 +378,7 @@ while bit < 8 {
     pow2 = pow2 * 2;
     bit = bit + 1;
 }
-let cbc15 = x;
-if cbc15 == 37 {
-    mismatch = mismatch + 0;
-} else {
+if x != 37 {
     mismatch = mismatch + 1;
 }
 

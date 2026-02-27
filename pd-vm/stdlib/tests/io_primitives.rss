@@ -1,24 +1,10 @@
 use super::rss::io as io;
 use super::rss::strings as string;
 
-let ok = true;
-
-if io::exists("stdlib/rss/io.rss") {
-} else {
-    ok = false;
-}
+assert(io::exists("stdlib/rss/io.rss"));
 
 let handle = io::popen("echo rustscript_io_builtin", "r");
 let output = io::read_all(handle);
 let closed = io::close(handle);
-if closed {
-} else {
-    ok = false;
-}
-
-if string::contains(output, "rustscript_io_builtin") {
-} else {
-    ok = false;
-}
-
-ok;
+assert(closed);
+assert(string::contains(output, "rustscript_io_builtin"));

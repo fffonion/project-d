@@ -503,6 +503,71 @@ fn compile_source_with_scheme_flavor() {
 }
 
 #[test]
+fn not_not_equal_and_else_if_are_supported_across_frontends() {
+    let rustscript = r#"
+        let a = 2;
+        let out = 0;
+        if !(a != 2) {
+            out = 10;
+        } else if a == 3 {
+            out = 20;
+        } else {
+            out = 30;
+        }
+        out;
+    "#;
+    let javascript = r#"
+        let a = 2;
+        let out = 0;
+        if (!(a != 2)) {
+            out = 10;
+        } else if (a == 3) {
+            out = 20;
+        } else {
+            out = 30;
+        }
+        out;
+    "#;
+    let lua = r#"
+        local a = 2
+        local out = 0
+        if not (a ~= 2) then
+            out = 10
+        elseif a == 3 then
+            out = 20
+        else
+            out = 30
+        end
+        out
+    "#;
+    let scheme = r#"
+        (define a 2)
+        (define out 0)
+        (if (not (/= a 2))
+            (set! out 10)
+            (if (= a 3)
+                (set! out 20)
+                (set! out 30)))
+        out
+    "#;
+
+    let cases = [
+        (SourceFlavor::RustScript, rustscript),
+        (SourceFlavor::JavaScript, javascript),
+        (SourceFlavor::Lua, lua),
+        (SourceFlavor::Scheme, scheme),
+    ];
+
+    for (flavor, source) in cases {
+        let compiled = compile_source_with_flavor(source, flavor).expect("compile should succeed");
+        let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+        let status = vm.run().expect("vm should run");
+        assert_eq!(status, VmStatus::Halted);
+        assert_eq!(vm.stack(), &[Value::Int(10)]);
+    }
+}
+
+#[test]
 fn collections_are_created_and_accessed_in_all_frontends() {
     let rustscript = r#"
         let arr = [1, 2, 3];

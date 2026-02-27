@@ -49,6 +49,7 @@ pub(super) fn execute_builtin_call(
         BuiltinFunction::IoFlush => builtin_io_flush(vm, args),
         BuiltinFunction::IoClose => builtin_io_close(vm, args),
         BuiltinFunction::IoExists => builtin_io_exists(args),
+        BuiltinFunction::Assert => builtin_assert(args),
     }
 }
 
@@ -437,6 +438,18 @@ fn builtin_io_close(vm: &mut Vm, args: &[Value]) -> VmResult<Vec<Value>> {
 fn builtin_io_exists(args: &[Value]) -> VmResult<Vec<Value>> {
     let path = arg_string(args, 0, "io_exists path")?;
     Ok(vec![Value::Bool(std::path::Path::new(path).exists())])
+}
+
+fn builtin_assert(args: &[Value]) -> VmResult<Vec<Value>> {
+    let condition = args
+        .first()
+        .ok_or_else(|| VmError::HostError("missing argument: assert condition".to_string()))?
+        .as_bool()?;
+    if condition {
+        Ok(Vec::new())
+    } else {
+        Err(VmError::HostError("assertion failed".to_string()))
+    }
 }
 
 fn spawn_shell_command(command: &str, mode: &str) -> VmResult<Child> {

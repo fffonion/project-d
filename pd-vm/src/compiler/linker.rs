@@ -302,7 +302,7 @@ fn remap_expr_indices(
             remap_expr_indices(lhs, local_base, function_map)?;
             remap_expr_indices(rhs, local_base, function_map)?;
         }
-        Expr::Neg(inner) => {
+        Expr::Neg(inner) | Expr::Not(inner) => {
             remap_expr_indices(inner, local_base, function_map)?;
         }
         Expr::Var(index) => {

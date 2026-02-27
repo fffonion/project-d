@@ -23,6 +23,8 @@ enum TokenKind {
     While,
     Break,
     Continue,
+    Bang,
+    BangEqual,
     Plus,
     Minus,
     Star,
@@ -82,6 +84,15 @@ impl<'a> Lexer<'a> {
             '+' => {
                 self.advance();
                 TokenKind::Plus
+            }
+            '!' => {
+                self.advance();
+                if self.current == Some('=') {
+                    self.advance();
+                    TokenKind::BangEqual
+                } else {
+                    TokenKind::Bang
+                }
             }
             '-' => {
                 self.advance();
@@ -766,7 +777,11 @@ impl Parser {
         let condition = self.parse_expr()?;
         let then_branch = self.parse_block("expected '{' after if condition")?;
         let else_branch = if self.match_kind(&TokenKind::Else) {
-            self.parse_block("expected '{' after else")?
+            if self.match_kind(&TokenKind::If) {
+                vec![self.parse_if()?]
+            } else {
+                self.parse_block("expected '{' after else")?
+            }
         } else {
             Vec::new()
         };
@@ -817,6 +832,9 @@ impl Parser {
             if self.match_kind(&TokenKind::EqualEqual) {
                 let rhs = self.parse_term()?;
                 expr = Expr::Eq(Box::new(expr), Box::new(rhs));
+            } else if self.match_kind(&TokenKind::BangEqual) {
+                let rhs = self.parse_term()?;
+                expr = Expr::Not(Box::new(Expr::Eq(Box::new(expr), Box::new(rhs))));
             } else if self.match_kind(&TokenKind::Less) {
                 let rhs = self.parse_term()?;
                 expr = Expr::Lt(Box::new(expr), Box::new(rhs));
@@ -866,6 +884,9 @@ impl Parser {
         if self.match_kind(&TokenKind::Minus) {
             let inner = self.parse_unary()?;
             Ok(Expr::Neg(Box::new(inner)))
+        } else if self.match_kind(&TokenKind::Bang) {
+            let inner = self.parse_unary()?;
+            Ok(Expr::Not(Box::new(inner)))
         } else {
             self.parse_primary()
         }

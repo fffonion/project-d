@@ -1,63 +1,18 @@
 use super::rss::strings::{equals, len, contains, split, trim, replace};
 use super::rss::arrays::{array_len, array_get};
 
-let ok = true;
-
-if len("hello") == 5 {
-} else {
-    ok = false;
-}
-
-if contains("hello", "ell") {
-} else {
-    ok = false;
-}
-
-if contains("hello", "zzz") {
-    ok = false;
-} else {
-}
-
-if equals(trim("  rustscript\n"), "rustscript") {
-} else {
-    ok = false;
-}
-
-if equals(replace("go gopher go", "go", "rs"), "rs rspher rs") {
-} else {
-    ok = false;
-}
+assert(len("hello") == 5);
+assert(contains("hello", "ell"));
+assert(contains("hello", "zzz") == false);
+assert(equals(trim("  rustscript\n"), "rustscript"));
+assert(equals(replace("go gopher go", "go", "rs"), "rs rspher rs"));
 
 let parts = split("a,b,c", ",");
-if array_len(parts) == 3 {
-} else {
-    ok = false;
-}
-
-if equals(array_get(parts, 0), "a") {
-} else {
-    ok = false;
-}
-
-if equals(array_get(parts, 2), "c") {
-} else {
-    ok = false;
-}
+assert(array_len(parts) == 3);
+assert(equals(array_get(parts, 0), "a"));
+assert(equals(array_get(parts, 2), "c"));
 
 let chars = split("ab", "");
-if array_len(chars) == 2 {
-} else {
-    ok = false;
-}
-
-if equals(array_get(chars, 0), "a") {
-} else {
-    ok = false;
-}
-
-if equals(array_get(chars, 1), "b") {
-} else {
-    ok = false;
-}
-
-ok;
+assert(array_len(chars) == 2);
+assert(equals(array_get(chars, 0), "a"));
+assert(equals(array_get(chars, 1), "b"));

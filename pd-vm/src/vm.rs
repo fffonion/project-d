@@ -506,6 +506,9 @@ struct NativeTrace {
     _memory: Arc<jit_native::ExecutableMemory>,
     entry: NativeTraceEntry,
     code: Arc<[u8]>,
+    root_ip: usize,
+    terminal: crate::jit::JitTraceTerminal,
+    has_call: bool,
 }
 
 #[cfg(any(
@@ -1092,32 +1095,49 @@ impl Vm {
     ))]
     fn execute_jit_native(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         self.ensure_native_trace(trace_id)?;
-        let entry = {
+        let (entry, root_ip, terminal, has_call) = {
             let native = self.native_traces.get(&trace_id).ok_or_else(|| {
                 VmError::JitNative(format!("native trace entry for id {} missing", trace_id))
             })?;
-            native.entry
+            (native.entry, native.root_ip, native.terminal.clone(), native.has_call)
         };
 
-        jit_native::clear_bridge_error();
-        let status = unsafe { entry(self as *mut Vm) };
-        self.native_trace_exec_count = self.native_trace_exec_count.saturating_add(1);
-        match status {
-            jit_native::STATUS_CONTINUE | jit_native::STATUS_TRACE_EXIT => {
-                Ok(TraceExecOutcome::Continue)
+        loop {
+            jit_native::clear_bridge_error();
+            let status = unsafe { entry(self as *mut Vm) };
+            self.native_trace_exec_count = self.native_trace_exec_count.saturating_add(1);
+            self.jit.mark_trace_executed(trace_id);
+
+            match status {
+                jit_native::STATUS_CONTINUE => return Ok(TraceExecOutcome::Continue),
+                jit_native::STATUS_TRACE_EXIT => {
+                    // Fast path: if this trace looped back to its own root and cannot yield via host
+                    // calls, keep executing in native mode without bouncing through the interpreter.
+                    if !has_call
+                        && terminal == crate::jit::JitTraceTerminal::LoopBack
+                        && self.ip == root_ip
+                    {
+                        continue;
+                    }
+                    return Ok(TraceExecOutcome::Continue);
+                }
+                jit_native::STATUS_HALTED => return Ok(TraceExecOutcome::Halted),
+                jit_native::STATUS_YIELDED => return Ok(TraceExecOutcome::Yielded),
+                jit_native::STATUS_ERROR => {
+                    let err = jit_native::take_bridge_error().unwrap_or_else(|| {
+                        VmError::JitNative(
+                            "jit bridge reported failure without VmError".to_string(),
+                        )
+                    });
+                    return Err(err);
+                }
+                other => {
+                    return Err(VmError::JitNative(format!(
+                        "unexpected native trace return status {}",
+                        other
+                    )));
+                }
             }
-            jit_native::STATUS_HALTED => Ok(TraceExecOutcome::Halted),
-            jit_native::STATUS_YIELDED => Ok(TraceExecOutcome::Yielded),
-            jit_native::STATUS_ERROR => {
-                let err = jit_native::take_bridge_error().unwrap_or_else(|| {
-                    VmError::JitNative("jit bridge reported failure without VmError".to_string())
-                });
-                Err(err)
-            }
-            other => Err(VmError::JitNative(format!(
-                "unexpected native trace return status {}",
-                other
-            ))),
         }
     }
 
@@ -1171,6 +1191,9 @@ impl Vm {
                 _memory: memory,
                 entry,
                 code,
+                root_ip: trace.root_ip,
+                terminal: trace.terminal,
+                has_call: trace.has_call,
             },
         );
         Ok(())

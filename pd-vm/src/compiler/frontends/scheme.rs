@@ -850,7 +850,18 @@ fn lower_list_expr(items: &[SchemeForm], line: usize) -> Result<String, ParseErr
             }
             fold_infix_expr(args, "-", line, 2, "- expects at least one argument")
         }
+        "not" => {
+            if args.len() != 1 {
+                return Err(ParseError {
+                    line,
+                    message: "not expects exactly one argument".to_string(),
+                });
+            }
+            let value = lower_expr(&args[0])?;
+            Ok(format!("!({value})"))
+        }
         "=" => lower_binary_expr(args, "==", line, "= expects exactly two arguments"),
+        "/=" => lower_binary_expr(args, "!=", line, "/= expects exactly two arguments"),
         "<" => lower_binary_expr(args, "<", line, "< expects exactly two arguments"),
         ">" => lower_binary_expr(args, ">", line, "> expects exactly two arguments"),
         "vector" => {

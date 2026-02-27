@@ -72,4 +72,29 @@ fn examples_run() {
 
     let stack = run_compiled_file(&root.join("example_complex.scm"));
     assert_eq!(stack, vec![Value::Int(12)]);
+
+    // AES fixture should run in regular test mode as well (not only perf tests).
+    let stack = run_compiled_file(&root.join("aes_128_cbc.rss"));
+    assert_eq!(
+        stack,
+        vec![
+            Value::Int(0),
+            Value::Int(0x76),
+            Value::Int(0x49),
+            Value::Int(0xAB),
+            Value::Int(0xAC),
+            Value::Int(0x81),
+            Value::Int(0x19),
+            Value::Int(0xB2),
+            Value::Int(0x46),
+            Value::Int(0xCE),
+            Value::Int(0xE9),
+            Value::Int(0x8E),
+            Value::Int(0x9B),
+            Value::Int(0x12),
+            Value::Int(0xE9),
+            Value::Int(0x19),
+            Value::Int(0x7D),
+        ]
+    );
 }
