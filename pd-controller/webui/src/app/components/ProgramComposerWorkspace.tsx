@@ -21,6 +21,7 @@ import { Button } from "@/components/ui/button";
 type ProgramComposerWorkspaceProps = {
   isCodeEditMode: boolean;
   onExitCodeEditMode: () => void;
+  showExitCodeEditButton?: boolean;
   onEnterCodeEditMode: () => void;
   source: UiSourceBundle;
   activeFlavor: SourceFlavor;
@@ -54,6 +55,7 @@ type ProgramComposerWorkspaceProps = {
 export function ProgramComposerWorkspace({
   isCodeEditMode,
   onExitCodeEditMode,
+  showExitCodeEditButton = true,
   onEnterCodeEditMode,
   source,
   activeFlavor,
@@ -95,9 +97,11 @@ export function ProgramComposerWorkspace({
                 Code edit mode. This version is saved as source-only and does not keep flow graph state.
               </div>
             </div>
-            <Button variant="outline" onClick={onExitCodeEditMode}>
-              Exit Edit
-            </Button>
+            {showExitCodeEditButton ? (
+              <Button variant="outline" onClick={onExitCodeEditMode}>
+                Exit Edit
+              </Button>
+            ) : null}
           </div>
         </CardHeader>
         <CardContent>

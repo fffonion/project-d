@@ -32,6 +32,7 @@ type ProgramDetailViewProps = {
   graphStatus: string;
   onBackToPrograms: () => void;
   isCodeEditMode: boolean;
+  canExitCodeEditMode: boolean;
   onExitCodeEditMode: () => void;
   onEnterCodeEditMode: () => void;
   source: UiSourceBundle;
@@ -78,6 +79,7 @@ export function ProgramDetailView({
   graphStatus,
   onBackToPrograms,
   isCodeEditMode,
+  canExitCodeEditMode,
   onExitCodeEditMode,
   onEnterCodeEditMode,
   source,
@@ -194,6 +196,7 @@ export function ProgramDetailView({
         <ProgramComposerWorkspace
           isCodeEditMode={isCodeEditMode}
           onExitCodeEditMode={onExitCodeEditMode}
+          showExitCodeEditButton={canExitCodeEditMode}
           onEnterCodeEditMode={onEnterCodeEditMode}
           source={source}
           activeFlavor={activeFlavor}

@@ -40,6 +40,7 @@ export type ComposerProgramApi = {
   nodes: FlowNode[];
   source: UiSourceBundle;
   loadBlocks: () => Promise<void>;
+  setPaletteMinimized: (value: boolean | ((current: boolean) => boolean)) => void;
   setActiveFlavor: (value: SourceFlavor) => void;
   setSource: (value: UiSourceBundle) => void;
   setIsCodeEditMode: (value: boolean) => void;
@@ -62,7 +63,7 @@ export function useComposer({ onError }: UseComposerArgs) {
   const [idSequence, setIdSequence] = useState(0);
   const [graphStatusState, setGraphStatusState] = useState("");
   const [graphCanvasRevision, setGraphCanvasRevision] = useState(0);
-  const [paletteMinimized, setPaletteMinimized] = useState(false);
+  const [paletteMinimized, setPaletteMinimized] = useState(true);
   const [codePanelMinimized, setCodePanelMinimized] = useState(true);
   const [isCodeEditModeState, setIsCodeEditModeState] = useState(false);
 

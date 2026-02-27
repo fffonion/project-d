@@ -80,6 +80,19 @@ export default function App() {
     [edges.applyProgramId, programs.programs]
   );
 
+  const canExitCodeEditMode = useMemo(() => {
+    if (!programs.selectedProgram || programs.selectedVersion === null) {
+      return true;
+    }
+    if (programs.selectedVersion === 0) {
+      return true;
+    }
+    const selectedVersionMeta = programs.selectedProgram.versions.find(
+      (item) => item.version === programs.selectedVersion
+    );
+    return selectedVersionMeta ? selectedVersionMeta.flow_synced : true;
+  }, [programs.selectedProgram, programs.selectedVersion]);
+
   const applyRoute = useCallback(
     async (route: RouteState) => {
       applyingRouteRef.current = true;
@@ -294,6 +307,7 @@ export default function App() {
               graphStatus={composer.graphStatus}
               onBackToPrograms={() => programs.setProgramView("list")}
               isCodeEditMode={composer.isCodeEditMode}
+              canExitCodeEditMode={canExitCodeEditMode}
               onExitCodeEditMode={() => composer.setIsCodeEditMode(false)}
               onEnterCodeEditMode={() => composer.setIsCodeEditMode(true)}
               source={composer.source}

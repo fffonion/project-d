@@ -27,6 +27,7 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
     loadBlocks,
     nodes,
     source,
+    setPaletteMinimized,
     setActiveFlavor,
     setSource,
     setIsCodeEditMode,
@@ -194,7 +195,8 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
   );
 
   const selectProgram = useCallback(
-    async (programId: string) => {
+    async (programId: string, options?: { forCreate?: boolean }) => {
+      setPaletteMinimized(options?.forCreate ? false : true);
       setSelectedProgramId(programId);
       setSelectedProgram(null);
       setSelectedVersion(null);
@@ -207,7 +209,7 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
         onError(err instanceof Error ? err.message : "failed to load program");
       }
     },
-    [loadProgramDetail, onError, setGraphStatus]
+    [loadProgramDetail, onError, setGraphStatus, setPaletteMinimized]
   );
 
   const selectProgramVersion = useCallback(
@@ -250,7 +252,7 @@ export function usePrograms({ onError, showProgramsSection, onProgramDeleted, co
       }
       const created = (await response.json()) as ProgramDetailResponse;
       await loadPrograms();
-      await selectProgram(created.program_id);
+      await selectProgram(created.program_id, { forCreate: true });
       showProgramsSection();
       setGraphStatus("program created");
     } catch (err) {
