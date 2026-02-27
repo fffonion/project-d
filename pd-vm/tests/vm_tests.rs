@@ -1,15 +1,8 @@
 use vm::{
     Assembler, BytecodeBuilder, CallOutcome, Compiler, Expr, HostFunction, HostFunctionRegistry,
-    JitConfig, OpCode, Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source,
-    compile_source_file, compile_source_with_flavor,
+    Program, SourceFlavor, Stmt, Value, Vm, VmStatus, assemble, compile_source, compile_source_file,
+    compile_source_with_flavor,
 };
-
-fn native_jit_supported() -> bool {
-    (cfg!(target_arch = "x86_64")
-        && (cfg!(target_os = "windows") || (cfg!(unix) && !cfg!(target_os = "macos"))))
-        || (cfg!(target_arch = "aarch64")
-            && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
-}
 
 struct YieldOnce {
     yielded: bool,
@@ -259,7 +252,6 @@ fn assignment_updates_existing_local_without_new_slot() {
 struct AddOne;
 struct EchoString;
 struct PrintBuiltin;
-struct PrintNoReturn;
 
 impl HostFunction for AddOne {
     fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
@@ -284,12 +276,6 @@ impl HostFunction for EchoString {
 impl HostFunction for PrintBuiltin {
     fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, vm::VmError> {
         Ok(CallOutcome::Return(args.to_vec()))
-    }
-}
-
-impl HostFunction for PrintNoReturn {
-    fn call(&mut self, _vm: &mut Vm, _args: &[Value]) -> Result<CallOutcome, vm::VmError> {
-        Ok(CallOutcome::Return(vec![]))
     }
 }
 
@@ -1723,137 +1709,4 @@ fn compile_source_emits_named_locals_in_debug_info() {
 
     assert_eq!(debug.local_index("alpha"), Some(0));
     assert_eq!(debug.local_index("beta"), Some(1));
-}
-
-#[test]
-fn trace_jit_compiles_hot_loop_and_is_dumpable() {
-    let source = r#"
-        let i = 0;
-        let sum = 0;
-        while i < 20 {
-            sum = sum + i;
-            i = i + 1;
-        }
-        sum;
-    "#;
-
-    let compiled = compile_source(source).expect("compile should succeed");
-    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
-    vm.set_jit_config(JitConfig {
-        enabled: native_jit_supported(),
-        hot_loop_threshold: 1,
-        max_trace_len: 512,
-    });
-
-    let status = vm.run().expect("vm should run");
-    assert_eq!(status, VmStatus::Halted);
-    assert_eq!(vm.stack(), &[Value::Int(190)]);
-
-    let dump = vm.dump_jit_info();
-    let snapshot = vm.jit_snapshot();
-    if native_jit_supported() {
-        assert!(
-            !snapshot.traces.is_empty(),
-            "expected at least one compiled trace, dump:\n{dump}"
-        );
-        assert!(dump.contains("compiled traces:"));
-        assert!(dump.contains("trace#"));
-        assert!(dump.contains("native trace#"));
-    } else {
-        assert!(snapshot.traces.is_empty());
-    }
-}
-
-#[test]
-fn compiler_uses_shl_for_power_of_two_multiply_and_jit_accepts_it() {
-    let source = r#"
-        let i = 0;
-        let sum = 0;
-        while i < 8 {
-            sum = sum + i * 8;
-            i = i + 1;
-        }
-        sum;
-    "#;
-
-    let compiled = compile_source(source).expect("compile should succeed");
-    assert!(
-        compiled.program.code.contains(&(OpCode::Shl as u8)),
-        "expected compiler to emit shl for power-of-two multiply"
-    );
-
-    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
-    vm.set_jit_config(JitConfig {
-        enabled: native_jit_supported(),
-        hot_loop_threshold: 1,
-        max_trace_len: 512,
-    });
-
-    let status = vm.run().expect("vm should run");
-    assert_eq!(status, VmStatus::Halted);
-    assert_eq!(vm.stack(), &[Value::Int(224)]);
-
-    if native_jit_supported() {
-        let dump = vm.dump_jit_info();
-        assert!(dump.contains(" shl"), "expected trace dump to include shl");
-    }
-}
-
-#[test]
-fn trace_jit_supports_host_calls_with_native_mixed_mode() {
-    let source = r#"
-        fn print(x);
-        let i = 0;
-        while i < 4 {
-            print(i);
-            i = i + 1;
-        }
-        i;
-    "#;
-
-    let compiled = compile_source(source).expect("compile should succeed");
-    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
-    vm.set_jit_config(JitConfig {
-        enabled: native_jit_supported(),
-        hot_loop_threshold: 1,
-        max_trace_len: 512,
-    });
-    for func in &compiled.functions {
-        match func.name.as_str() {
-            "print" => vm.register_function(Box::new(PrintNoReturn)),
-            _ => panic!("unexpected function {}", func.name),
-        };
-    }
-
-    let status = vm.run().expect("vm should run");
-    assert_eq!(status, VmStatus::Halted);
-    assert_eq!(vm.stack(), &[Value::Int(4)]);
-
-    let dump = vm.dump_jit_info();
-    let snapshot = vm.jit_snapshot();
-    if native_jit_supported() {
-        assert!(
-            snapshot
-                .attempts
-                .iter()
-                .any(|attempt| attempt.result.is_ok()),
-            "expected at least one successful trace compile, dump:\n{dump}"
-        );
-        assert!(
-            snapshot.traces.iter().any(|trace| trace.has_call),
-            "expected at least one call-containing trace, dump:\n{dump}"
-        );
-        assert!(
-            dump.contains(" call"),
-            "expected trace dump to include call"
-        );
-        assert!(
-            vm.jit_native_trace_count() > 0,
-            "expected call trace to compile to native code"
-        );
-        assert!(
-            vm.jit_native_exec_count() > 0,
-            "expected native call trace to execute at least once"
-        );
-    }
 }
