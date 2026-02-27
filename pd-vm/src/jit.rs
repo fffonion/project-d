@@ -21,7 +21,8 @@ impl Default for JitConfig {
 }
 
 fn native_jit_supported() -> bool {
-    (cfg!(target_arch = "x86_64") && (cfg!(target_os = "linux") || cfg!(target_os = "windows")))
+    (cfg!(target_arch = "x86_64")
+        && (cfg!(target_os = "windows") || (cfg!(unix) && !cfg!(target_os = "macos"))))
         || (cfg!(target_arch = "aarch64")
             && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
 }
@@ -49,7 +50,7 @@ impl JitNyiReason {
     pub fn message(&self) -> String {
         match self {
             JitNyiReason::UnsupportedArch => {
-                "target architecture is not x86_64-linux/x86_64-windows/aarch64-linux/aarch64-macos".to_string()
+                "target architecture is not x86_64-unix-non-macos/x86_64-windows/aarch64-linux/aarch64-macos".to_string()
             }
             JitNyiReason::HotLoopThresholdZero => "hot_loop_threshold must be > 0".to_string(),
             JitNyiReason::UnsupportedOpcode(op) => format!("unsupported opcode 0x{op:02X}"),
@@ -609,7 +610,7 @@ fn nyi_reference() -> Vec<JitNyiDoc> {
         },
         JitNyiDoc {
             item: "Unsupported native JIT targets",
-            reason: "native emission currently supports x86_64 on linux/windows plus aarch64 on linux/macos",
+            reason: "native emission currently supports x86_64 on windows plus unix non-macos, and aarch64 on linux/macos",
         },
     ]
 }

@@ -69,9 +69,11 @@ struct ValueLayout {
     tag_offset: i32,
     tag_size: u8,
     int_tag: u32,
+    float_tag: u32,
     bool_tag: u32,
     string_tag: u32,
     int_payload_offset: i32,
+    float_payload_offset: i32,
     bool_payload_offset: i32,
 }
 
@@ -94,9 +96,11 @@ enum Cond {
     Ne = 1,
     Hs = 2,
     Lo = 3,
+    Mi = 4,
     Hi = 8,
     Ge = 10,
     Lt = 11,
+    Gt = 12,
     Le = 13,
 }
 
@@ -118,19 +122,19 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Add => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Add)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Add)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Sub => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Sub)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Sub)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Mul => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Mul)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Mul)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Div => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Div)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Div)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Shl => {
@@ -150,11 +154,11 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Clt => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Clt)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Clt)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Cgt => {
-                emit_native_step_binary_int_inline(&mut code, layout, IntBinaryOp::Cgt)?;
+                emit_native_step_binary_numeric_inline(&mut code, layout, NativeBinaryNumericOp::Cgt)?;
                 emit_native_status_check(&mut code, &mut status_checks);
             }
             crate::jit::TraceStep::Pop => {
@@ -251,7 +255,7 @@ fn emit_status_halted(code: &mut Vec<u8>) {
 }
 
 #[derive(Clone, Copy)]
-enum IntBinaryOp {
+enum NativeBinaryNumericOp {
     Add,
     Sub,
     Mul,
@@ -260,10 +264,10 @@ enum IntBinaryOp {
     Cgt,
 }
 
-fn emit_native_step_binary_int_inline(
+fn emit_native_step_binary_numeric_inline(
     code: &mut Vec<u8>,
     layout: NativeStackLayout,
-    op: IntBinaryOp,
+    op: NativeBinaryNumericOp,
 ) -> VmResult<()> {
     let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
     let stack_ptr_offset = vec_ptr_disp(layout.vm_stack_offset, layout.stack_vec)?;
@@ -289,9 +293,11 @@ fn emit_native_step_binary_int_inline(
 
     emit_ldr_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
     emit_ldr_x_disp(code, 15, 13, layout.value.int_payload_offset)?;
+    let mut int_div_zero = None;
+    let mut float_div_zero = None;
 
     match op {
-        IntBinaryOp::Add => {
+        NativeBinaryNumericOp::Add => {
             emit_add_reg(code, 14, 14, 15);
             emit_str_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
             emit_store_tag_ptr(code, 12, layout.value, layout.value.int_tag)?;
@@ -299,7 +305,7 @@ fn emit_native_step_binary_int_inline(
             emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
             emit_status_continue(code);
         }
-        IntBinaryOp::Sub => {
+        NativeBinaryNumericOp::Sub => {
             emit_sub_reg(code, 14, 14, 15);
             emit_str_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
             emit_store_tag_ptr(code, 12, layout.value, layout.value.int_tag)?;
@@ -307,7 +313,7 @@ fn emit_native_step_binary_int_inline(
             emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
             emit_status_continue(code);
         }
-        IntBinaryOp::Mul => {
+        NativeBinaryNumericOp::Mul => {
             emit_mul_x(code, 14, 14, 15);
             emit_str_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
             emit_store_tag_ptr(code, 12, layout.value, layout.value.int_tag)?;
@@ -315,31 +321,20 @@ fn emit_native_step_binary_int_inline(
             emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
             emit_status_continue(code);
         }
-        IntBinaryOp::Div => {
+        NativeBinaryNumericOp::Div => {
             emit_cmp_imm(code, 15, 0)?;
-            let div_zero = emit_b_cond_placeholder(code, Cond::Eq);
+            int_div_zero = Some(emit_b_cond_placeholder(code, Cond::Eq));
             emit_sdiv_x(code, 14, 14, 15);
             emit_str_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
             emit_store_tag_ptr(code, 12, layout.value, layout.value.int_tag)?;
             emit_sub_imm(code, 9, 9, 1);
             emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
             emit_status_continue(code);
-            let ok_done = emit_b_placeholder(code);
-
-            let err_label = code.len();
-            emit_status_error(code);
-            let done_label = code.len();
-            patch_b_cond_rel19(code, div_zero, err_label)?;
-            patch_b_rel26(code, ok_done, done_label)?;
-            patch_b_cond_rel19(code, underflow, err_label)?;
-            patch_b_cond_rel19(code, lhs_not_int, err_label)?;
-            patch_b_cond_rel19(code, rhs_not_int, err_label)?;
-            return Ok(());
         }
-        IntBinaryOp::Clt | IntBinaryOp::Cgt => {
+        NativeBinaryNumericOp::Clt | NativeBinaryNumericOp::Cgt => {
             emit_cmp_reg(code, 14, 15);
             emit_mov_imm64(code, 14, 0);
-            let false_branch = if matches!(op, IntBinaryOp::Clt) {
+            let false_branch = if matches!(op, NativeBinaryNumericOp::Clt) {
                 emit_b_cond_placeholder(code, Cond::Ge)
             } else {
                 emit_b_cond_placeholder(code, Cond::Le)
@@ -353,16 +348,113 @@ fn emit_native_step_binary_int_inline(
             emit_status_continue(code);
         }
     }
+    let int_done = emit_b_placeholder(code);
 
-    let ok_done = emit_b_placeholder(code);
+    let float_dispatch = code.len();
+    patch_b_cond_rel19(code, lhs_not_int, float_dispatch)?;
+    patch_b_cond_rel19(code, rhs_not_int, float_dispatch)?;
+
+    emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
+    emit_load_tag_w_from_ptr(code, 17, 13, layout.value)?;
+
+    emit_cmp_imm(code, 16, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    let lhs_is_int = emit_b_cond_placeholder(code, Cond::Eq);
+    emit_cmp_imm(code, 16, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    let lhs_not_float = emit_b_cond_placeholder(code, Cond::Ne);
+    emit_ldr_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+    let lhs_ready_branch = emit_b_placeholder(code);
+    let lhs_int = code.len();
+    emit_ldr_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
+    emit_scvtf_d_from_x(code, 0, 14);
+    let lhs_ready = code.len();
+    patch_b_cond_rel19(code, lhs_is_int, lhs_int)?;
+    patch_b_rel26(code, lhs_ready_branch, lhs_ready)?;
+
+    emit_cmp_imm(code, 17, u16::try_from(layout.value.int_tag).unwrap_or(0xFFFF))?;
+    let rhs_is_int = emit_b_cond_placeholder(code, Cond::Eq);
+    emit_cmp_imm(code, 17, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    let rhs_not_float = emit_b_cond_placeholder(code, Cond::Ne);
+    emit_ldr_d_disp(code, 1, 13, layout.value.float_payload_offset)?;
+    let rhs_ready_branch = emit_b_placeholder(code);
+    let rhs_int = code.len();
+    emit_ldr_x_disp(code, 15, 13, layout.value.int_payload_offset)?;
+    emit_scvtf_d_from_x(code, 1, 15);
+    let rhs_ready = code.len();
+    patch_b_cond_rel19(code, rhs_is_int, rhs_int)?;
+    patch_b_rel26(code, rhs_ready_branch, rhs_ready)?;
+
+    match op {
+        NativeBinaryNumericOp::Add => {
+            emit_fadd_d(code, 0, 0, 1);
+            emit_store_tag_ptr(code, 12, layout.value, layout.value.float_tag)?;
+            emit_str_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+            emit_sub_imm(code, 9, 9, 1);
+            emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
+            emit_status_continue(code);
+        }
+        NativeBinaryNumericOp::Sub => {
+            emit_fsub_d(code, 0, 0, 1);
+            emit_store_tag_ptr(code, 12, layout.value, layout.value.float_tag)?;
+            emit_str_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+            emit_sub_imm(code, 9, 9, 1);
+            emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
+            emit_status_continue(code);
+        }
+        NativeBinaryNumericOp::Mul => {
+            emit_fmul_d(code, 0, 0, 1);
+            emit_store_tag_ptr(code, 12, layout.value, layout.value.float_tag)?;
+            emit_str_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+            emit_sub_imm(code, 9, 9, 1);
+            emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
+            emit_status_continue(code);
+        }
+        NativeBinaryNumericOp::Div => {
+            emit_fcmp_d_zero(code, 1);
+            float_div_zero = Some(emit_b_cond_placeholder(code, Cond::Eq));
+            emit_fdiv_d(code, 0, 0, 1);
+            emit_store_tag_ptr(code, 12, layout.value, layout.value.float_tag)?;
+            emit_str_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+            emit_sub_imm(code, 9, 9, 1);
+            emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
+            emit_status_continue(code);
+        }
+        NativeBinaryNumericOp::Clt | NativeBinaryNumericOp::Cgt => {
+            emit_fcmp_d(code, 0, 1);
+            emit_mov_imm64(code, 14, 0);
+            let true_branch = if matches!(op, NativeBinaryNumericOp::Clt) {
+                emit_b_cond_placeholder(code, Cond::Mi)
+            } else {
+                emit_b_cond_placeholder(code, Cond::Gt)
+            };
+            let false_done = emit_b_placeholder(code);
+            let true_label = code.len();
+            emit_mov_imm64(code, 14, 1);
+            let result_label = code.len();
+            patch_b_cond_rel19(code, true_branch, true_label)?;
+            patch_b_rel26(code, false_done, result_label)?;
+            emit_store_bool_from_w(code, 14, 12, layout.value)?;
+            emit_sub_imm(code, 9, 9, 1);
+            emit_str_x_disp(code, 9, VM_REG, stack_len_offset)?;
+            emit_status_continue(code);
+        }
+    }
+    let float_done = emit_b_placeholder(code);
+
     let err_label = code.len();
     emit_status_error(code);
     let done_label = code.len();
 
     patch_b_cond_rel19(code, underflow, err_label)?;
-    patch_b_cond_rel19(code, lhs_not_int, err_label)?;
-    patch_b_cond_rel19(code, rhs_not_int, err_label)?;
-    patch_b_rel26(code, ok_done, done_label)?;
+    patch_b_cond_rel19(code, lhs_not_float, err_label)?;
+    patch_b_cond_rel19(code, rhs_not_float, err_label)?;
+    if let Some(patch) = int_div_zero {
+        patch_b_cond_rel19(code, patch, err_label)?;
+    }
+    if let Some(patch) = float_div_zero {
+        patch_b_cond_rel19(code, patch, err_label)?;
+    }
+    patch_b_rel26(code, int_done, done_label)?;
+    patch_b_rel26(code, float_done, done_label)?;
     Ok(())
 }
 
@@ -389,15 +481,29 @@ fn emit_native_step_neg_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     emit_str_x_disp(code, 14, 12, layout.value.int_payload_offset)?;
     emit_store_tag_ptr(code, 12, layout.value, layout.value.int_tag)?;
     emit_status_continue(code);
+    let int_done = emit_b_placeholder(code);
 
-    let ok_done = emit_b_placeholder(code);
+    let float_check = code.len();
+    patch_b_cond_rel19(code, not_int, float_check)?;
+
+    emit_load_tag_w_from_ptr(code, 16, 12, layout.value)?;
+    emit_cmp_imm(code, 16, u16::try_from(layout.value.float_tag).unwrap_or(0xFFFF))?;
+    let not_float = emit_b_cond_placeholder(code, Cond::Ne);
+    emit_ldr_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+    emit_fneg_d(code, 0, 0);
+    emit_store_tag_ptr(code, 12, layout.value, layout.value.float_tag)?;
+    emit_str_d_disp(code, 0, 12, layout.value.float_payload_offset)?;
+    emit_status_continue(code);
+    let float_done = emit_b_placeholder(code);
+
     let err_label = code.len();
     emit_status_error(code);
     let done_label = code.len();
 
     patch_b_cond_rel19(code, underflow, err_label)?;
-    patch_b_cond_rel19(code, not_int, err_label)?;
-    patch_b_rel26(code, ok_done, done_label)?;
+    patch_b_cond_rel19(code, not_float, err_label)?;
+    patch_b_rel26(code, int_done, done_label)?;
+    patch_b_rel26(code, float_done, done_label)?;
     Ok(())
 }
 
@@ -1176,6 +1282,18 @@ fn emit_str_b_imm12(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult
     Ok(())
 }
 
+fn emit_ldr_d_imm12(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
+    let insn = 0xFD400000_u32 | encode_imm12_scaled(offset, 3, "ldr d")? | ((rn as u32) << 5) | (vt as u32);
+    emit_u32(code, insn);
+    Ok(())
+}
+
+fn emit_str_d_imm12(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
+    let insn = 0xFD000000_u32 | encode_imm12_scaled(offset, 3, "str d")? | ((rn as u32) << 5) | (vt as u32);
+    emit_u32(code, insn);
+    Ok(())
+}
+
 fn emit_ldr_x_disp(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
     emit_ldr_x_imm12(code, rt, rn, offset)
 }
@@ -1206,6 +1324,54 @@ fn emit_ldr_b_disp(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<
 
 fn emit_str_b_disp(code: &mut Vec<u8>, rt: u8, rn: u8, offset: i32) -> VmResult<()> {
     emit_str_b_imm12(code, rt, rn, offset)
+}
+
+fn emit_ldr_d_disp(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
+    emit_ldr_d_imm12(code, vt, rn, offset)
+}
+
+fn emit_str_d_disp(code: &mut Vec<u8>, vt: u8, rn: u8, offset: i32) -> VmResult<()> {
+    emit_str_d_imm12(code, vt, rn, offset)
+}
+
+fn emit_scvtf_d_from_x(code: &mut Vec<u8>, vd: u8, xn: u8) {
+    let insn = 0x9E620000_u32 | ((xn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
+}
+
+fn emit_fadd_d(code: &mut Vec<u8>, vd: u8, vn: u8, vm: u8) {
+    let insn = 0x1E602800_u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
+}
+
+fn emit_fsub_d(code: &mut Vec<u8>, vd: u8, vn: u8, vm: u8) {
+    let insn = 0x1E603800_u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
+}
+
+fn emit_fmul_d(code: &mut Vec<u8>, vd: u8, vn: u8, vm: u8) {
+    let insn = 0x1E600800_u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
+}
+
+fn emit_fdiv_d(code: &mut Vec<u8>, vd: u8, vn: u8, vm: u8) {
+    let insn = 0x1E601800_u32 | ((vm as u32) << 16) | ((vn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
+}
+
+fn emit_fcmp_d(code: &mut Vec<u8>, vn: u8, vm: u8) {
+    let insn = 0x1E602000_u32 | ((vm as u32) << 16) | ((vn as u32) << 5);
+    emit_u32(code, insn);
+}
+
+fn emit_fcmp_d_zero(code: &mut Vec<u8>, vn: u8) {
+    let insn = 0x1E602008_u32 | ((vn as u32) << 5);
+    emit_u32(code, insn);
+}
+
+fn emit_fneg_d(code: &mut Vec<u8>, vd: u8, vn: u8) {
+    let insn = 0x1E614000_u32 | ((vn as u32) << 5) | (vd as u32);
+    emit_u32(code, insn);
 }
 
 fn emit_b_placeholder(code: &mut Vec<u8>) -> usize {
@@ -1374,6 +1540,7 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     ];
     let (tag_offset, tag_size) = detect_tag_layout(&stable_tag_pairs)?;
     let int_tag = decode_tag(&int_a_bytes, tag_offset, tag_size);
+    let float_tag = decode_tag(&float_a_bytes, tag_offset, tag_size);
     let bool_tag = decode_tag(&bool_false_bytes, tag_offset, tag_size);
     let string_tag = decode_tag(&string_a_bytes, tag_offset, tag_size);
 
@@ -1395,6 +1562,27 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     let int_payload_offset = int_payload_offset.ok_or_else(|| {
         VmError::JitNative(
             "unable to find Value::Int payload offset for native emission".to_string(),
+        )
+    })?;
+
+    let float_match_a = float_a.to_le_bytes();
+    let float_match_b = float_b.to_le_bytes();
+    let mut float_payload_offset = None;
+    for offset in 0..=value_size.saturating_sub(8) {
+        if float_a_bytes[offset..offset + 8] == float_match_a
+            && float_b_bytes[offset..offset + 8] == float_match_b
+        {
+            if float_payload_offset.is_some() {
+                return Err(VmError::JitNative(
+                    "ambiguous Value::Float payload offset for native emission".to_string(),
+                ));
+            }
+            float_payload_offset = Some(offset);
+        }
+    }
+    let float_payload_offset = float_payload_offset.ok_or_else(|| {
+        VmError::JitNative(
+            "unable to find Value::Float payload offset for native emission".to_string(),
         )
     })?;
 
@@ -1427,9 +1615,11 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
         tag_offset: usize_to_i32(tag_offset, "Value tag offset")?,
         tag_size: tag_size as u8,
         int_tag,
+        float_tag,
         bool_tag,
         string_tag,
         int_payload_offset: usize_to_i32(int_payload_offset, "Value::Int payload offset")?,
+        float_payload_offset: usize_to_i32(float_payload_offset, "Value::Float payload offset")?,
         bool_payload_offset: usize_to_i32(bool_payload_offset, "Value::Bool payload offset")?,
     })
 }
@@ -1762,6 +1952,73 @@ mod tests {
         let status = execute_single_step(&mut vm, TraceStep::Add).expect("native add should run");
         assert_eq!(status, STATUS_CONTINUE);
         assert_eq!(vm.stack, vec![Value::Int(5)]);
+    }
+
+    #[test]
+    fn add_step_supports_float_and_mixed_numeric() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::Float(1.5));
+        vm.stack.push(Value::Int(2));
+
+        let status = execute_single_step(&mut vm, TraceStep::Add).expect("native add should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        match vm.stack.last() {
+            Some(Value::Float(value)) => assert!((*value - 3.5).abs() < f64::EPSILON),
+            other => panic!("expected float result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn neg_step_supports_float() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::Float(8.5));
+
+        let status = execute_single_step(&mut vm, TraceStep::Neg).expect("native neg should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        match vm.stack.last() {
+            Some(Value::Float(value)) => assert!((*value + 8.5).abs() < f64::EPSILON),
+            other => panic!("expected float result, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn div_step_supports_float_and_rejects_zero() {
+        let mut ok_vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        ok_vm.stack.push(Value::Float(7.5));
+        ok_vm.stack.push(Value::Float(2.5));
+        let status =
+            execute_single_step(&mut ok_vm, TraceStep::Div).expect("native float div should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        match ok_vm.stack.last() {
+            Some(Value::Float(value)) => assert!((*value - 3.0).abs() < f64::EPSILON),
+            other => panic!("expected float result, got {other:?}"),
+        }
+
+        let mut err_vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        err_vm.stack.push(Value::Float(1.0));
+        err_vm.stack.push(Value::Float(-0.0));
+        let status =
+            execute_single_step(&mut err_vm, TraceStep::Div).expect("native float div should run");
+        assert_eq!(status, STATUS_ERROR);
+    }
+
+    #[test]
+    fn clt_supports_float_and_nan_is_false() {
+        let mut clt_vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        clt_vm.stack.push(Value::Float(1.5));
+        clt_vm.stack.push(Value::Float(2.0));
+        let status =
+            execute_single_step(&mut clt_vm, TraceStep::Clt).expect("native clt should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(clt_vm.stack, vec![Value::Bool(true)]);
+
+        let mut nan_vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        nan_vm.stack.push(Value::Float(f64::NAN));
+        nan_vm.stack.push(Value::Float(1.0));
+        let status =
+            execute_single_step(&mut nan_vm, TraceStep::Clt).expect("native clt should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(nan_vm.stack, vec![Value::Bool(false)]);
     }
 
     #[test]

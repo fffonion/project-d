@@ -2,7 +2,7 @@ use super::{VmError, VmResult};
 
 #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 mod aarch64;
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+#[cfg(all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 mod x86_64;
 
 pub(super) const STATUS_CONTINUE: i32 = 0;
@@ -21,7 +21,7 @@ pub(super) trait NativeBackend {
     fn take_bridge_error() -> Option<VmError>;
 }
 
-#[cfg(all(target_arch = "x86_64", any(target_os = "linux", target_os = "windows")))]
+#[cfg(all(target_arch = "x86_64", any(target_os = "windows", all(unix, not(target_os = "macos")))))]
 type ActiveBackend = x86_64::X86_64Backend;
 #[cfg(all(target_arch = "aarch64", any(target_os = "linux", target_os = "macos")))]
 type ActiveBackend = aarch64::AArch64Backend;

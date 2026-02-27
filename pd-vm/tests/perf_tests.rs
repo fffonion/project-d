@@ -364,7 +364,8 @@ fn perf_jit_native_reduces_tight_loop_latency() {
 }
 
 fn native_jit_supported() -> bool {
-    (cfg!(target_arch = "x86_64") && (cfg!(target_os = "linux") || cfg!(target_os = "windows")))
+    (cfg!(target_arch = "x86_64")
+        && (cfg!(target_os = "windows") || (cfg!(unix) && !cfg!(target_os = "macos"))))
         || (cfg!(target_arch = "aarch64")
             && (cfg!(target_os = "linux") || cfg!(target_os = "macos")))
 }
