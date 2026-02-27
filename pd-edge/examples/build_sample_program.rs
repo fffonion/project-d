@@ -1,6 +1,6 @@
 use std::{io, path::PathBuf};
 
-use proxy::{ABI_VERSION, HOST_FUNCTION_COUNT, function_by_name};
+use edge::{ABI_VERSION, HOST_FUNCTION_COUNT, function_by_name};
 use reqwest::StatusCode;
 use vm::{HostImport, compile_source_file, encode_program, validate_program};
 
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(source_rel);
     let compiled = compile_source_file(&source_path)?;
 
-    ensure_proxy_abi(&compiled.program.imports)?;
+    ensure_edge_abi(&compiled.program.imports)?;
     validate_program(&compiled.program, HOST_FUNCTION_COUNT)?;
 
     let payload = encode_program(&compiled.program)?;
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn ensure_proxy_abi(imports: &[HostImport]) -> Result<(), io::Error> {
+fn ensure_edge_abi(imports: &[HostImport]) -> Result<(), io::Error> {
     for import in imports {
         let Some(abi) = function_by_name(&import.name) else {
             return Err(io::Error::other(format!(

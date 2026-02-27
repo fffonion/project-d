@@ -25,7 +25,7 @@ pub struct StartDebugSessionRequest {
     pub stop_on_entry: bool,
 }
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DebugSessionStatus {
     pub active: bool,
     pub header_name: Option<String>,
@@ -176,10 +176,31 @@ pub fn run_vm_with_optional_debugger(
             session.header_name.as_str()
         );
         let mut debugger = session.debugger.lock().expect("debugger lock poisoned");
-        return vm.run_with_debugger(&mut debugger);
+        let result = vm.run_with_debugger(&mut debugger);
+        let detached = debugger.take_detach_event();
+        drop(debugger);
+
+        if detached {
+            stop_debug_session_if_match(store, &session);
+        }
+
+        return result;
     }
 
     vm.run()
+}
+
+fn stop_debug_session_if_match(store: &SharedDebugSession, active: &Arc<DebugSession>) {
+    let mut guard = store.session.write().expect("debug session lock poisoned");
+    if let Some(current) = guard.as_ref()
+        && Arc::ptr_eq(current, active)
+    {
+        *guard = None;
+        info!(
+            "{} session removed automatically after debugger detached",
+            category_debug()
+        );
+    }
 }
 
 fn request_matches_session(request_headers: &HeaderMap, session: &DebugSession) -> bool {

@@ -1,9 +1,9 @@
 [package]
-name = "pd-proxy-abi"
+name = "pd-edge-abi"
 version.workspace = true
 edition.workspace = true
 
 [lib]
-name = "proxy_abi"
+name = "edge_abi"
 
 [dependencies]

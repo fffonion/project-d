@@ -61,6 +61,7 @@ pub struct ProxyVmContext {
     request_headers: HeaderMap,
     response_headers: HeaderMap,
     response_content: Option<String>,
+    response_status: Option<u16>,
     upstream: Option<String>,
     rate_limiter: SharedRateLimiter,
 }
@@ -74,6 +75,7 @@ impl ProxyVmContext {
             request_headers,
             response_headers: HeaderMap::new(),
             response_content: None,
+            response_status: None,
             upstream: None,
             rate_limiter,
         }
@@ -86,6 +88,7 @@ pub type SharedProxyVmContext = Arc<Mutex<ProxyVmContext>>;
 pub struct VmExecutionOutcome {
     pub response_headers: HeaderMap,
     pub response_content: Option<String>,
+    pub response_status: Option<u16>,
     pub upstream: Option<String>,
 }
 
@@ -94,6 +97,7 @@ pub fn snapshot_execution_outcome(context: &SharedProxyVmContext) -> VmExecution
     VmExecutionOutcome {
         response_headers: context.response_headers.clone(),
         response_content: context.response_content.clone(),
+        response_status: context.response_status,
         upstream: context.upstream.clone(),
     }
 }
@@ -114,6 +118,10 @@ pub fn register_host_module(vm: &mut Vm, context: SharedProxyVmContext) -> Resul
     vm.bind_function(
         "set_upstream",
         Box::new(SetUpstreamFunction::new(context.clone())),
+    );
+    vm.bind_function(
+        "set_response_status",
+        Box::new(SetResponseStatusFunction::new(context.clone())),
     );
     vm.bind_function(
         "rate_limit_allow",
@@ -203,6 +211,32 @@ struct SetUpstreamFunction {
 impl SetUpstreamFunction {
     fn new(context: SharedProxyVmContext) -> Self {
         Self { context }
+    }
+}
+
+struct SetResponseStatusFunction {
+    context: SharedProxyVmContext,
+}
+
+impl SetResponseStatusFunction {
+    fn new(context: SharedProxyVmContext) -> Self {
+        Self { context }
+    }
+}
+
+impl HostFunction for SetResponseStatusFunction {
+    fn call(&mut self, _vm: &mut Vm, args: &[Value]) -> Result<CallOutcome, VmError> {
+        expect_arg_count(args, 1)?;
+        let status = expect_int(args, 0)?;
+        if !(100..=599).contains(&status) {
+            return Err(VmError::HostError(format!(
+                "status code must be in range 100..=599, got '{status}'",
+            )));
+        }
+
+        let mut context = self.context.lock().expect("vm context lock poisoned");
+        context.response_status = Some(status as u16);
+        Ok(CallOutcome::Return(vec![]))
     }
 }
 
@@ -416,6 +450,23 @@ mod tests {
 
         let guard = context.lock().expect("vm context lock poisoned");
         assert_eq!(guard.response_content.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn set_response_status_stores_status_code() {
+        let context = empty_context();
+        let mut function = SetResponseStatusFunction::new(context.clone());
+        let mut vm = dummy_vm();
+
+        let ok = function.call(&mut vm, &[Value::Int(429)]);
+        assert!(matches!(ok, Ok(CallOutcome::Return(_))));
+        {
+            let guard = context.lock().expect("vm context lock poisoned");
+            assert_eq!(guard.response_status, Some(429));
+        }
+
+        let err = function.call(&mut vm, &[Value::Int(42)]);
+        assert!(matches!(err, Err(VmError::HostError(_))));
     }
 
     #[test]

@@ -5,15 +5,16 @@ pub struct AbiFunction {
     pub arity: u8,
 }
 
-pub const ABI_VERSION: u16 = 2;
+pub const ABI_VERSION: u16 = 3;
 
 pub const FN_GET_HEADER: u16 = 0;
 pub const FN_SET_HEADER: u16 = 1;
 pub const FN_SET_RESPONSE_CONTENT: u16 = 2;
 pub const FN_SET_UPSTREAM: u16 = 3;
-pub const FN_RATE_LIMIT_ALLOW: u16 = 4;
+pub const FN_SET_RESPONSE_STATUS: u16 = 4;
+pub const FN_RATE_LIMIT_ALLOW: u16 = 5;
 
-pub const FUNCTIONS: [AbiFunction; 5] = [
+pub const FUNCTIONS: [AbiFunction; 6] = [
     AbiFunction {
         index: FN_GET_HEADER,
         name: "get_header",
@@ -32,6 +33,11 @@ pub const FUNCTIONS: [AbiFunction; 5] = [
     AbiFunction {
         index: FN_SET_UPSTREAM,
         name: "set_upstream",
+        arity: 1,
+    },
+    AbiFunction {
+        index: FN_SET_RESPONSE_STATUS,
+        name: "set_response_status",
         arity: 1,
     },
     AbiFunction {
@@ -83,7 +89,7 @@ mod tests {
     #[test]
     fn abi_json_contains_declared_functions() {
         let manifest = abi_json();
-        assert!(manifest.contains("\"abi_version\": 2"));
+        assert!(manifest.contains("\"abi_version\": 3"));
         for function in FUNCTIONS {
             assert!(manifest.contains(function.name));
         }

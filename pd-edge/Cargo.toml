@@ -1,22 +1,26 @@
 [package]
-name = "pd-proxy"
+name = "pd-edge"
 version.workspace = true
 edition.workspace = true
+build = "build.rs"
 
 [lib]
-name = "proxy"
+name = "edge"
 
 [dependencies]
 axum = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["full"] }
 vm = { package = "pd-vm", path = "../pd-vm" }
-proxy_abi = { package = "pd-proxy-abi", path = "../pd-proxy-abi" }
+edge_abi = { package = "pd-edge-abi", path = "../pd-edge-abi" }
 serde = { version = "1", features = ["derive"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
 owo-colors = "4"
 supports-color = "3"
+base64 = "0.22"
+rand = "0.8"
+uuid = { version = "1", features = ["v4"] }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", features = ["Win32_Foundation", "Win32_System_Console"] }

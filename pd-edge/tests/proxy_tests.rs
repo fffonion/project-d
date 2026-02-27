@@ -1,19 +1,22 @@
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream},
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
 use axum::{
-    Router,
+    Json, Router,
     body::{Body, to_bytes},
+    extract::State,
     http::{HeaderValue, Request, Response, StatusCode},
-    routing::any,
+    routing::{any, post},
 };
-use proxy::{
-    FN_SET_HEADER, FN_SET_RESPONSE_CONTENT, FN_SET_UPSTREAM, SharedState, build_control_app,
-    build_data_app,
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use edge::{
+    ActiveControlPlaneConfig, CommandResultPayload, ControlPlaneCommand, EdgeCommandResult,
+    EdgePollRequest, EdgePollResponse, FN_SET_HEADER, FN_SET_RESPONSE_CONTENT, FN_SET_UPSTREAM,
+    SharedState, build_admin_app, build_data_app, spawn_active_control_plane_client,
 };
 use tokio::{sync::Notify, task::JoinHandle, time::timeout};
 use vm::{BytecodeBuilder, Program, Value, compile_source, encode_program};
@@ -34,8 +37,8 @@ async fn spawn_proxy(
 ) -> (SocketAddr, SocketAddr, JoinHandle<()>, JoinHandle<()>) {
     let state = SharedState::new(max_program_bytes);
     let (data_addr, data_handle) = spawn_server(build_data_app(state.clone())).await;
-    let (control_addr, control_handle) = spawn_server(build_control_app(state)).await;
-    (data_addr, control_addr, data_handle, control_handle)
+    let (admin_addr, admin_handle) = spawn_server(build_admin_app(state)).await;
+    (data_addr, admin_addr, data_handle, admin_handle)
 }
 
 fn build_short_circuit_program(body: &str, header: Option<(&str, &str)>) -> Program {
@@ -86,12 +89,12 @@ fn build_upstream_program(upstream: &str, header: Option<(&str, &str)>) -> Progr
 
 async fn upload_program(
     client: &reqwest::Client,
-    control_addr: SocketAddr,
+    admin_addr: SocketAddr,
     program: &Program,
 ) -> reqwest::Response {
     let bytes = encode_program(program).expect("encode should succeed");
     client
-        .put(format!("http://{control_addr}/program"))
+        .put(format!("http://{admin_addr}/program"))
         .header("content-type", "application/octet-stream")
         .body(bytes)
         .send()
@@ -123,7 +126,7 @@ async fn send_pdb_continue(addr: SocketAddr) {
 
 #[tokio::test]
 async fn no_active_program_returns_404() {
-    let (data_addr, _control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, _admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let response = client
@@ -134,16 +137,16 @@ async fn no_active_program_returns_404() {
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn upload_valid_program_controls_subsequent_requests() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
     let program = build_short_circuit_program("hello vm", None);
 
-    let upload = upload_program(&client, control_addr, &program).await;
+    let upload = upload_program(&client, admin_addr, &program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let response = client
@@ -155,16 +158,16 @@ async fn upload_valid_program_controls_subsequent_requests() {
     assert_eq!(response.text().await.expect("body should read"), "hello vm");
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn short_circuit_path_returns_200_body_and_headers() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
     let program = build_short_circuit_program("payload", Some(("x-vm", "short")));
 
-    let upload = upload_program(&client, control_addr, &program).await;
+    let upload = upload_program(&client, admin_addr, &program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let response = client
@@ -190,7 +193,7 @@ async fn short_circuit_path_returns_200_body_and_headers() {
     assert_eq!(response.text().await.expect("body should read"), "payload");
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
@@ -219,11 +222,11 @@ async fn upstream_path_proxies_method_path_query_and_body() {
     }));
     let (upstream_addr, upstream_handle) = spawn_server(upstream_app).await;
 
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
     let program = build_upstream_program(&upstream_addr.to_string(), None);
 
-    let upload = upload_program(&client, control_addr, &program).await;
+    let upload = upload_program(&client, admin_addr, &program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let response = client
@@ -247,7 +250,7 @@ async fn upstream_path_proxies_method_path_query_and_body() {
 
     upstream_handle.abort();
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
@@ -261,11 +264,11 @@ async fn vm_response_headers_are_applied_on_short_circuit_and_proxied_paths() {
     }));
     let (upstream_addr, upstream_handle) = spawn_server(upstream_app).await;
 
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let short_program = build_short_circuit_program("short", Some(("x-vm", "from-vm-short")));
-    let upload_short = upload_program(&client, control_addr, &short_program).await;
+    let upload_short = upload_program(&client, admin_addr, &short_program).await;
     assert_eq!(upload_short.status(), StatusCode::NO_CONTENT);
     let short_response = client
         .get(format!("http://{data_addr}/"))
@@ -282,7 +285,7 @@ async fn vm_response_headers_are_applied_on_short_circuit_and_proxied_paths() {
 
     let proxied_program =
         build_upstream_program(&upstream_addr.to_string(), Some(("x-vm", "from-vm-proxy")));
-    let upload_proxy = upload_program(&client, control_addr, &proxied_program).await;
+    let upload_proxy = upload_program(&client, admin_addr, &proxied_program).await;
     assert_eq!(upload_proxy.status(), StatusCode::NO_CONTENT);
     let proxied_response = client
         .get(format!("http://{data_addr}/"))
@@ -304,20 +307,20 @@ async fn vm_response_headers_are_applied_on_short_circuit_and_proxied_paths() {
 
     upstream_handle.abort();
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn invalid_upload_returns_400_and_keeps_previous_program() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let original = build_short_circuit_program("old", None);
-    let upload_ok = upload_program(&client, control_addr, &original).await;
+    let upload_ok = upload_program(&client, admin_addr, &original).await;
     assert_eq!(upload_ok.status(), StatusCode::NO_CONTENT);
 
     let upload_bad = client
-        .put(format!("http://{control_addr}/program"))
+        .put(format!("http://{admin_addr}/program"))
         .header("content-type", "application/octet-stream")
         .body(vec![0u8, 1, 2, 3, 4])
         .send()
@@ -334,7 +337,7 @@ async fn invalid_upload_returns_400_and_keeps_previous_program() {
     assert_eq!(response.text().await.expect("body should read"), "old");
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
@@ -355,11 +358,11 @@ async fn in_flight_request_uses_old_program_after_swap() {
     }));
     let (upstream_addr, upstream_handle) = spawn_server(upstream_app).await;
 
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let old_program = build_upstream_program(&upstream_addr.to_string(), None);
-    let upload_old = upload_program(&client, control_addr, &old_program).await;
+    let upload_old = upload_program(&client, admin_addr, &old_program).await;
     assert_eq!(upload_old.status(), StatusCode::NO_CONTENT);
 
     let in_flight_client = client.clone();
@@ -380,7 +383,7 @@ async fn in_flight_request_uses_old_program_after_swap() {
         .expect("upstream should receive in-flight request");
 
     let new_program = build_short_circuit_program("new", None);
-    let upload_new = upload_program(&client, control_addr, &new_program).await;
+    let upload_new = upload_program(&client, admin_addr, &new_program).await;
     assert_eq!(upload_new.status(), StatusCode::NO_CONTENT);
 
     release.notify_waiters();
@@ -399,7 +402,7 @@ async fn in_flight_request_uses_old_program_after_swap() {
 
     upstream_handle.abort();
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
@@ -410,11 +413,11 @@ async fn upstream_unreachable_returns_502() {
     let closed_addr = listener.local_addr().expect("listener should have addr");
     drop(listener);
 
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let program = build_upstream_program(&closed_addr.to_string(), None);
-    let upload = upload_program(&client, control_addr, &program).await;
+    let upload = upload_program(&client, admin_addr, &program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let response = client
@@ -425,17 +428,17 @@ async fn upstream_unreachable_returns_502() {
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn debug_session_lifecycle_endpoints_work() {
-    let (_data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (_data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
     let debug_addr = reserve_tcp_addr();
 
     let start_response = client
-        .put(format!("http://{control_addr}/debug/session"))
+        .put(format!("http://{admin_addr}/debug/session"))
         .header("content-type", "application/json")
         .body(format!(
             r#"{{"header_name":"x-debug","header_value":"on","tcp_addr":"{debug_addr}","stop_on_entry":true}}"#
@@ -446,7 +449,7 @@ async fn debug_session_lifecycle_endpoints_work() {
     assert_eq!(start_response.status(), StatusCode::CREATED);
 
     let status_response = client
-        .get(format!("http://{control_addr}/debug/session"))
+        .get(format!("http://{admin_addr}/debug/session"))
         .send()
         .await
         .expect("status request should complete");
@@ -459,14 +462,14 @@ async fn debug_session_lifecycle_endpoints_work() {
     assert!(status_body.contains(r#""header_name":"x-debug""#));
 
     let stop_response = client
-        .delete(format!("http://{control_addr}/debug/session"))
+        .delete(format!("http://{admin_addr}/debug/session"))
         .send()
         .await
         .expect("stop request should complete");
     assert_eq!(stop_response.status(), StatusCode::NO_CONTENT);
 
     let status_after_stop = client
-        .get(format!("http://{control_addr}/debug/session"))
+        .get(format!("http://{admin_addr}/debug/session"))
         .send()
         .await
         .expect("status request should complete");
@@ -478,12 +481,12 @@ async fn debug_session_lifecycle_endpoints_work() {
     assert!(status_after_stop_body.contains(r#""active":false"#));
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn tiny_language_can_enforce_simple_rate_limit() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let source = r#"
@@ -499,7 +502,7 @@ async fn tiny_language_can_enforce_simple_rate_limit() {
     "#;
     let compiled = compile_source(source).expect("source should compile");
 
-    let upload = upload_program(&client, control_addr, &compiled.program).await;
+    let upload = upload_program(&client, admin_addr, &compiled.program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     for _ in 0..2 {
@@ -552,21 +555,21 @@ async fn tiny_language_can_enforce_simple_rate_limit() {
     );
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn debug_attached_request_does_not_block_non_debug_requests() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let program = build_short_circuit_program("ok", None);
-    let upload = upload_program(&client, control_addr, &program).await;
+    let upload = upload_program(&client, admin_addr, &program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let debug_addr = reserve_tcp_addr();
     let start_response = client
-        .put(format!("http://{control_addr}/debug/session"))
+        .put(format!("http://{admin_addr}/debug/session"))
         .header("content-type", "application/json")
         .body(format!(
             r#"{{"header_name":"x-debug","header_value":"on","tcp_addr":"{debug_addr}","stop_on_entry":true}}"#
@@ -611,12 +614,12 @@ async fn debug_attached_request_does_not_block_non_debug_requests() {
     assert_eq!(body, "ok");
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
 }
 
 #[tokio::test]
 async fn uploaded_program_with_locals_executes_successfully() {
-    let (data_addr, control_addr, data_handle, control_handle) = spawn_proxy(1024 * 1024).await;
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
     let source = r#"
@@ -631,7 +634,7 @@ async fn uploaded_program_with_locals_executes_successfully() {
         "compiled source should carry debug info"
     );
 
-    let upload = upload_program(&client, control_addr, &compiled.program).await;
+    let upload = upload_program(&client, admin_addr, &compiled.program).await;
     assert_eq!(upload.status(), StatusCode::NO_CONTENT);
 
     let response = client
@@ -646,5 +649,179 @@ async fn uploaded_program_with_locals_executes_successfully() {
     );
 
     data_handle.abort();
-    control_handle.abort();
+    admin_handle.abort();
+}
+
+#[derive(Clone)]
+struct MockControlPlaneState {
+    command: Arc<Mutex<Option<ControlPlaneCommand>>>,
+    results: Arc<Mutex<Vec<EdgeCommandResult>>>,
+    notified: Arc<Notify>,
+}
+
+impl MockControlPlaneState {
+    fn new(command: Option<ControlPlaneCommand>) -> Self {
+        Self {
+            command: Arc::new(Mutex::new(command)),
+            results: Arc::new(Mutex::new(Vec::new())),
+            notified: Arc::new(Notify::new()),
+        }
+    }
+}
+
+async fn poll_rpc_handler(
+    State(state): State<MockControlPlaneState>,
+    Json(_request): Json<EdgePollRequest>,
+) -> Json<EdgePollResponse> {
+    let command = state.command.lock().expect("command lock").take();
+    Json(EdgePollResponse {
+        command,
+        poll_interval_ms: 100,
+    })
+}
+
+async fn result_rpc_handler(
+    State(state): State<MockControlPlaneState>,
+    Json(result): Json<EdgeCommandResult>,
+) -> StatusCode {
+    state.results.lock().expect("results lock").push(result);
+    state.notified.notify_waiters();
+    StatusCode::NO_CONTENT
+}
+
+#[tokio::test]
+async fn active_control_plane_can_push_program_and_receive_result() {
+    let program = build_short_circuit_program("from-active-control-plane", None);
+    let program_bytes = encode_program(&program).expect("encode should succeed");
+    let command = ControlPlaneCommand::ApplyProgram {
+        command_id: "cmd-apply-1".to_string(),
+        program_base64: STANDARD.encode(program_bytes),
+    };
+
+    let mock_state = MockControlPlaneState::new(Some(command));
+    let control_app = Router::new()
+        .route("/rpc/v1/edge/poll", post(poll_rpc_handler))
+        .route("/rpc/v1/edge/result", post(result_rpc_handler))
+        .with_state(mock_state.clone());
+    let (rpc_addr, rpc_handle) = spawn_server(control_app).await;
+
+    let state = SharedState::new(1024 * 1024);
+    let (data_addr, data_handle) = spawn_server(build_data_app(state.clone())).await;
+    let active_handle = spawn_active_control_plane_client(
+        state.clone(),
+        ActiveControlPlaneConfig {
+            control_plane_url: format!("http://{rpc_addr}"),
+            edge_id: "dp-test-1".to_string(),
+            edge_name: "dp-test-friendly".to_string(),
+            poll_interval_ms: 100,
+            request_timeout_ms: 2_000,
+        },
+    );
+
+    timeout(Duration::from_secs(3), mock_state.notified.notified())
+        .await
+        .expect("control plane should receive a result");
+
+    let first_result = {
+        let results = mock_state.results.lock().expect("results lock");
+        results
+            .first()
+            .cloned()
+            .expect("at least one result should exist")
+    };
+    assert_eq!(first_result.command_id, "cmd-apply-1");
+    assert!(first_result.ok);
+    match first_result.result {
+        CommandResultPayload::ApplyProgram { report } => {
+            assert!(report.applied);
+            assert_eq!(report.message, None);
+        }
+        other => panic!("unexpected result payload: {other:?}"),
+    }
+
+    let client = reqwest::Client::new();
+    let response = client
+        .get(format!("http://{data_addr}/"))
+        .send()
+        .await
+        .expect("request should complete");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.text().await.expect("body should read"),
+        "from-active-control-plane"
+    );
+
+    active_handle.abort();
+    data_handle.abort();
+    rpc_handle.abort();
+}
+
+#[tokio::test]
+async fn debug_session_is_removed_after_debugger_disconnects() {
+    let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
+    let client = reqwest::Client::new();
+
+    let program = build_short_circuit_program("ok", None);
+    let upload = upload_program(&client, admin_addr, &program).await;
+    assert_eq!(upload.status(), StatusCode::NO_CONTENT);
+
+    let debug_addr = reserve_tcp_addr();
+    let start_response = client
+        .put(format!("http://{admin_addr}/debug/session"))
+        .header("content-type", "application/json")
+        .body(format!(
+            r#"{{"header_name":"x-debug","header_value":"on","tcp_addr":"{debug_addr}","stop_on_entry":true}}"#
+        ))
+        .send()
+        .await
+        .expect("start debug request should complete");
+    assert_eq!(start_response.status(), StatusCode::CREATED);
+
+    let debug_client = client.clone();
+    let debug_request = tokio::spawn(async move {
+        let response = debug_client
+            .get(format!("http://{data_addr}/debug-target"))
+            .header("x-debug", "on")
+            .send()
+            .await
+            .expect("debug request should complete");
+        let status = response.status();
+        let body = response.text().await.expect("body should read");
+        (status, body)
+    });
+
+    tokio::task::spawn_blocking(move || {
+        let mut stream = TcpStream::connect(debug_addr).expect("debugger tcp should accept");
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let mut buffer = [0u8; 256];
+        let _ = stream.read(&mut buffer);
+    })
+    .await
+    .expect("debugger helper should not panic");
+
+    let (status, body) = timeout(Duration::from_secs(2), debug_request)
+        .await
+        .expect("debug request timed out")
+        .expect("debug task should join");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, "ok");
+
+    let mut inactive = false;
+    for _ in 0..20 {
+        let response = client
+            .get(format!("http://{admin_addr}/debug/session"))
+            .send()
+            .await
+            .expect("status request should complete");
+        let body = response.text().await.expect("status body should read");
+        if body.contains(r#""active":false"#) {
+            inactive = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(inactive, "debug session should be cleaned up after detach");
+
+    data_handle.abort();
+    admin_handle.abort();
 }

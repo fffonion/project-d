@@ -1,10 +1,11 @@
 {
-  "abi_version": 2,
+  "abi_version": 3,
   "functions": [
     { "index": 0, "name": "get_header", "arity": 1 },
     { "index": 1, "name": "set_header", "arity": 2 },
     { "index": 2, "name": "set_response_content", "arity": 1 },
     { "index": 3, "name": "set_upstream", "arity": 1 },
-    { "index": 4, "name": "rate_limit_allow", "arity": 3 }
+    { "index": 4, "name": "set_response_status", "arity": 1 },
+    { "index": 5, "name": "rate_limit_allow", "arity": 3 }
   ]
 }
