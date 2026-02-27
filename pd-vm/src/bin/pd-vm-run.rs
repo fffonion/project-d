@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -308,8 +309,9 @@ fn print_usage() {
 fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
     println!("pd-vm REPL (RustScript)");
     println!("history: up/down arrows, commands: .help, .quit");
-    println!("note: each entry runs as an independent snippet");
+    println!("state: locals persist across entries");
     let mut editor = DefaultEditor::new()?;
+    let mut session = ReplSession::default();
     loop {
         match editor.readline("pd-vm> ") {
             Ok(line) => {
@@ -324,7 +326,7 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
                 let _ = editor.add_history_entry(line);
-                let compiled = match compile_repl_snippet(line) {
+                let compiled = match compile_repl_snippet(line, &session.locals) {
                     Ok(compiled) => compiled,
                     Err(err) => {
                         println!("{err}");
@@ -339,6 +341,7 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
                 loop {
                     match vm.run() {
                         Ok(VmStatus::Halted) => {
+                            sync_repl_session(&vm, &mut session);
                             if let Some(value) = vm.stack().last() {
                                 println!("=> {}", format_value(value));
                             } else {
@@ -348,6 +351,7 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Ok(VmStatus::Yielded) => continue,
                         Err(err) => {
+                            sync_repl_session(&vm, &mut session);
                             println!("runtime error: {err}");
                             break;
                         }
@@ -364,6 +368,27 @@ fn run_repl() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct ReplSession {
+    locals: BTreeMap<String, Value>,
+}
+
+fn sync_repl_session(vm: &Vm, session: &mut ReplSession) {
+    let Some(debug) = vm.debug_info() else {
+        return;
+    };
+    let mut next = BTreeMap::new();
+    for local in &debug.locals {
+        let Some(value) = vm.locals().get(local.index as usize) else {
+            continue;
+        };
+        if is_repl_serializable_value(value) {
+            next.insert(local.name.clone(), value.clone());
+        }
+    }
+    session.locals = next;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -390,18 +415,123 @@ fn handle_repl_command(line: &str) -> Option<ReplAction> {
     }
 }
 
-fn compile_repl_snippet(input: &str) -> Result<vm::CompiledProgram, vm::SourceError> {
+fn compile_repl_snippet(
+    input: &str,
+    locals: &BTreeMap<String, Value>,
+) -> Result<vm::CompiledProgram, vm::SourceError> {
     let trimmed = input.trim_end();
-    match compile_source(trimmed) {
+    let source = build_repl_source(trimmed, locals);
+    match compile_source(&source) {
         Ok(compiled) => Ok(compiled),
         Err(first_err) => {
             if trimmed.ends_with(';') {
-                return Err(first_err);
+                return Err(remap_repl_source_error(first_err, locals.len()));
             }
             let fallback = format!("{trimmed};");
-            compile_source(&fallback).map_err(|_| first_err)
+            let fallback_source = build_repl_source(&fallback, locals);
+            compile_source(&fallback_source)
+                .map_err(|_| remap_repl_source_error(first_err, locals.len()))
         }
     }
+}
+
+fn build_repl_source(input: &str, locals: &BTreeMap<String, Value>) -> String {
+    if locals.is_empty() {
+        return input.to_string();
+    }
+
+    let mut source = String::new();
+    for (name, value) in locals {
+        if let Some(literal) = render_repl_value_literal(value) {
+            source.push_str("let ");
+            source.push_str(name);
+            source.push_str(" = ");
+            source.push_str(&literal);
+            source.push_str(";\n");
+        }
+    }
+    source.push_str(input);
+    source
+}
+
+fn remap_repl_source_error(error: vm::SourceError, prelude_lines: usize) -> vm::SourceError {
+    match error {
+        vm::SourceError::Parse(mut parse) => {
+            if prelude_lines > 0 {
+                parse.line = parse.line.saturating_sub(prelude_lines).max(1);
+            }
+            vm::SourceError::Parse(parse)
+        }
+        other => other,
+    }
+}
+
+fn render_repl_value_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Int(number) => {
+            if *number == i64::MIN {
+                None
+            } else {
+                Some(number.to_string())
+            }
+        }
+        Value::Float(_) => None,
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::String(text) => Some(format!("\"{}\"", escape_repl_string_literal(text))),
+        Value::Array(items) => {
+            let mut rendered = Vec::with_capacity(items.len());
+            for item in items {
+                rendered.push(render_repl_value_literal(item)?);
+            }
+            Some(format!("[{}]", rendered.join(", ")))
+        }
+        Value::Map(entries) => {
+            let mut rendered = Vec::with_capacity(entries.len());
+            for (key, item) in entries {
+                let rendered_key = render_repl_map_key_literal(key)?;
+                let rendered_value = render_repl_value_literal(item)?;
+                rendered.push(format!("{rendered_key}: {rendered_value}"));
+            }
+            Some(format!("{{{}}}", rendered.join(", ")))
+        }
+    }
+}
+
+fn render_repl_map_key_literal(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::Int(number) => {
+            if *number == i64::MIN {
+                None
+            } else {
+                Some(number.to_string())
+            }
+        }
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::String(text) => Some(format!("\"{}\"", escape_repl_string_literal(text))),
+        Value::Float(_) | Value::Array(_) | Value::Map(_) => None,
+    }
+}
+
+fn escape_repl_string_literal(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\r' => escaped.push_str("\\r"),
+            '\t' => escaped.push_str("\\t"),
+            '\0' => escaped.push_str("\\0"),
+            other => escaped.push(other),
+        }
+    }
+    escaped
+}
+
+fn is_repl_serializable_value(value: &Value) -> bool {
+    render_repl_value_literal(value).is_some()
 }
 
 struct PrintFunction;
@@ -461,6 +591,7 @@ impl HostFunction for NoopFunction {
 
 fn format_value(value: &Value) -> String {
     match value {
+        Value::Null => "null".to_string(),
         Value::Int(value) => value.to_string(),
         Value::Float(value) => value.to_string(),
         Value::Bool(value) => value.to_string(),
@@ -486,7 +617,10 @@ fn format_value(value: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use super::parse_cli_args;
+    use vm::Value;
 
     fn s(value: &str) -> String {
         value.to_string()
@@ -630,7 +764,28 @@ mod tests {
 
     #[test]
     fn repl_compile_falls_back_to_expression_semicolon() {
-        let compiled = super::compile_repl_snippet("1 + 2").expect("compile should succeed");
+        let compiled =
+            super::compile_repl_snippet("1 + 2", &BTreeMap::new()).expect("compile should succeed");
         assert_eq!(compiled.locals, 0);
+    }
+
+    #[test]
+    fn repl_compile_uses_persisted_locals() {
+        let mut locals = BTreeMap::new();
+        locals.insert("x".to_string(), Value::Int(41));
+        let compiled =
+            super::compile_repl_snippet("x + 1", &locals).expect("compile should succeed");
+        assert!(compiled.locals >= 1);
+    }
+
+    #[test]
+    fn repl_compile_remaps_parse_error_line_numbers() {
+        let mut locals = BTreeMap::new();
+        locals.insert("x".to_string(), Value::Int(1));
+        match super::compile_repl_snippet("let y = ;", &locals) {
+            Err(vm::SourceError::Parse(parse)) => assert_eq!(parse.line, 1),
+            Err(other) => panic!("expected parse error, got {other}"),
+            Ok(_) => panic!("expected parse error, got successful compile"),
+        }
     }
 }

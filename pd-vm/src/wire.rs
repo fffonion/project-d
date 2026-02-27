@@ -138,6 +138,9 @@ pub fn encode_program(program: &Program) -> Result<Vec<u8>, WireError> {
 
     for constant in &program.constants {
         match constant {
+            Value::Null => {
+                out.push(4);
+            }
             Value::Int(value) => {
                 out.push(0);
                 out.extend_from_slice(&value.to_le_bytes());
@@ -209,6 +212,7 @@ pub fn decode_program(bytes: &[u8]) -> Result<Program, WireError> {
     for _ in 0..constant_count {
         let tag = cursor.read_u8()?;
         let value = match tag {
+            4 => Value::Null,
             0 => Value::Int(cursor.read_i64()?),
             3 => Value::Float(cursor.read_f64()?),
             1 => {

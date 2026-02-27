@@ -18,6 +18,7 @@ pub struct Debugger {
     line_breakpoints: HashSet<u32>,
     step_mode: StepMode,
     server: Option<DebugServer>,
+    client_detached: bool,
 }
 
 impl Default for Debugger {
@@ -33,6 +34,7 @@ impl Debugger {
             line_breakpoints: HashSet::new(),
             step_mode: StepMode::Running,
             server: None,
+            client_detached: false,
         }
     }
 
@@ -44,6 +46,7 @@ impl Debugger {
             line_breakpoints: HashSet::new(),
             step_mode: StepMode::Running,
             server: Some(DebugServer::new(listener)),
+            client_detached: false,
         })
     }
 
@@ -93,26 +96,30 @@ impl Debugger {
         }
         if should_break {
             self.step_mode = StepMode::Running;
-            self.repl(vm);
+            self.client_detached = self.repl(vm);
         }
     }
 
-    fn repl(&mut self, vm: &Vm) {
+    pub fn take_detach_event(&mut self) -> bool {
+        std::mem::take(&mut self.client_detached)
+    }
+
+    fn repl(&mut self, vm: &Vm) -> bool {
         if let Some(server) = self.server.as_mut() {
-            server.repl(
-                vm,
-                &mut self.breakpoints,
-                &mut self.line_breakpoints,
-                &mut self.step_mode,
-            );
-        } else {
-            repl_stdio(
+            return server.repl(
                 vm,
                 &mut self.breakpoints,
                 &mut self.line_breakpoints,
                 &mut self.step_mode,
             );
         }
+        repl_stdio(
+            vm,
+            &mut self.breakpoints,
+            &mut self.line_breakpoints,
+            &mut self.step_mode,
+        );
+        false
     }
 }
 
@@ -143,28 +150,38 @@ impl DebugServer {
         breakpoints: &mut HashSet<usize>,
         line_breakpoints: &mut HashSet<u32>,
         step: &mut StepMode,
-    ) {
+    ) -> bool {
         if self.ensure_client().is_err() {
-            return;
+            return false;
         }
         let Some(stream) = self.stream.as_mut() else {
-            return;
+            return false;
         };
         let _ = writeln!(stream, "debugger attached. type 'help' for commands");
         let Ok(clone) = stream.try_clone() else {
-            return;
+            self.stream = None;
+            return true;
         };
         let mut reader = io::BufReader::new(clone);
         loop {
             if write_prompt(stream).is_err() {
-                break;
+                self.stream = None;
+                return true;
             }
             let mut line = String::new();
-            if reader.read_line(&mut line).is_err() {
-                break;
+            match reader.read_line(&mut line) {
+                Ok(0) => {
+                    self.stream = None;
+                    return true;
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    self.stream = None;
+                    return true;
+                }
             }
             if handle_command(&line, vm, breakpoints, line_breakpoints, step, stream).is_break() {
-                break;
+                return false;
             }
         }
     }

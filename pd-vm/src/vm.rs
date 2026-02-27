@@ -24,6 +24,7 @@ mod jit_native;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
+    Null,
     Int(i64),
     Float(f64),
     Bool(bool),
@@ -601,6 +602,9 @@ fn compute_program_cache_key(program: &Program) -> u64 {
 
 fn hash_value(value: &Value, state: &mut impl Hasher) {
     match value {
+        Value::Null => {
+            6u8.hash(state);
+        }
         Value::Int(value) => {
             0u8.hash(state);
             value.hash(state);

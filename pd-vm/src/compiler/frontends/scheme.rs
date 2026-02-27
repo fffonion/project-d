@@ -814,10 +814,49 @@ fn lower_expr(form: &SchemeForm) -> Result<String, ParseError> {
             if name == "false" {
                 return Ok("false".to_string());
             }
+            if let Some(chain) = lower_optional_chain_symbol(name, form.line)? {
+                return Ok(chain);
+            }
             normalize_identifier(name, form.line, "symbol")
         }
         SchemeNode::List(items) => lower_list_expr(items, form.line),
     }
+}
+
+fn lower_optional_chain_symbol(name: &str, line: usize) -> Result<Option<String>, ParseError> {
+    if !name.contains("?.") {
+        return Ok(None);
+    }
+
+    let parts: Vec<&str> = name.split("?.").collect();
+    if parts.len() < 2 || parts.iter().any(|part| part.is_empty()) {
+        return Err(ParseError {
+            line,
+            message: format!("invalid optional chain symbol '{name}'"),
+        });
+    }
+
+    let root = normalize_identifier(parts[0], line, "optional chain root")?;
+    let mut out = root;
+    for member in &parts[1..] {
+        if !is_valid_member_ident(member) {
+            return Err(ParseError {
+                line,
+                message: format!("invalid optional chain member '{member}' in '{name}'"),
+            });
+        }
+        out.push_str("?.");
+        out.push_str(member);
+    }
+    Ok(Some(out))
+}
+
+fn is_valid_member_ident(member: &str) -> bool {
+    let mut chars = member.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    is_ident_start(first) && chars.all(is_ident_continue)
 }
 
 fn lower_list_expr(items: &[SchemeForm], line: usize) -> Result<String, ParseError> {

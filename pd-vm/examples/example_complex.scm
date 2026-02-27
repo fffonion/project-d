@@ -14,4 +14,8 @@
 (set! base 8)
 (define closure-value (add 5))
 
+(define profile (hash (stats (hash (score closure-value)))))
+(define chained-score profile?.stats?.score)
+(define missing-score profile?.missing?.value)
+
 (print closure-value)

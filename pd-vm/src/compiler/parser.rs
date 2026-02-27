@@ -41,6 +41,7 @@ enum TokenKind {
     RBrace,
     Comma,
     Colon,
+    Question,
     Dot,
     Semicolon,
     Equal,
@@ -145,6 +146,10 @@ impl<'a> Lexer<'a> {
             ':' => {
                 self.advance();
                 TokenKind::Colon
+            }
+            '?' => {
+                self.advance();
+                TokenKind::Question
             }
             '.' => {
                 self.advance();
@@ -1212,6 +1217,25 @@ impl Parser {
                 let member = self.expect_ident("expected member name after '.'")?;
                 expr = self.build_builtin_call_expr(
                     BuiltinFunction::Get,
+                    vec![expr, Expr::String(member)],
+                )?;
+                continue;
+            }
+            if self.match_kind(&TokenKind::Question) {
+                self.expect(&TokenKind::Dot, "expected '.' after '?' in optional access")?;
+                if self.match_kind(&TokenKind::LBracket) {
+                    let key = self.parse_expr()?;
+                    self.expect(
+                        &TokenKind::RBracket,
+                        "expected ']' after optional index expression",
+                    )?;
+                    expr = self
+                        .build_builtin_call_expr(BuiltinFunction::GetOptional, vec![expr, key])?;
+                    continue;
+                }
+                let member = self.expect_ident("expected member name after '?.'")?;
+                expr = self.build_builtin_call_expr(
+                    BuiltinFunction::GetOptional,
                     vec![expr, Expr::String(member)],
                 )?;
                 continue;

@@ -19,4 +19,13 @@ let add = |value| value + base;
 let base = 8;
 let closure_value = add(5);
 
+let profile = { stats: { score: closure_value } };
+let chained_score = profile?.stats?.score;
+let missing_score = profile?.missing?.value;
+
+let matched = match chained_score {
+    12 => closure_value,
+    _ => 0,
+};
+
 print!(closure_value);

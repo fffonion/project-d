@@ -18,4 +18,8 @@ let add = (value) => value + base;
 base = 8;
 let closureValue = add(5);
 
+const profile = { stats: { score: closureValue } };
+const chainedScore = profile?.stats?.score;
+const missingScore = profile?.missing?.value;
+
 console.log(closureValue);

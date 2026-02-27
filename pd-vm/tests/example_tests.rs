@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use vm::{CallOutcome, FunctionDecl, HostFunction, Value, Vm, VmStatus, compile_source_file};
+use vm::{
+    CallOutcome, FunctionDecl, HostFunction, SourceFlavor, Value, Vm, VmStatus,
+    compile_source_file, compile_source_with_flavor,
+};
 
 struct PrintFunction;
 struct AddOneFunction;
@@ -47,6 +50,18 @@ fn run_compiled_file(path: &Path) -> Vec<Value> {
     vm.stack().to_vec()
 }
 
+fn run_compiled_source(flavor: SourceFlavor, source: &str) -> Vec<Value> {
+    let compiled = compile_source_with_flavor(source, flavor).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let mut jit_config = vm.jit_config().clone();
+    jit_config.enabled = false;
+    vm.set_jit_config(jit_config);
+    register_functions(&mut vm, &compiled.functions);
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    vm.stack().to_vec()
+}
+
 #[test]
 fn examples_run() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("examples");
@@ -83,5 +98,52 @@ fn examples_run() {
         vec![Value::String(
             "7649abac8119b246cee98e9b12e9197d".to_string()
         )]
+    );
+}
+
+#[test]
+fn nullable_chain_maps_in_all_frontends() {
+    let rss_source = r#"
+let a = { b: { c: 7 } };
+a?.b?.c;
+let m = { b: {} };
+m?.b?.c;
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::RustScript, rss_source),
+        vec![Value::Int(7), Value::Null]
+    );
+
+    let js_source = r#"
+const a = { b: { c: 7 } };
+a?.b?.c;
+const m = { b: {} };
+m?.b?.c;
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::JavaScript, js_source),
+        vec![Value::Int(7), Value::Null]
+    );
+
+    let lua_source = r#"
+local a = { b = { c = 7 } }
+a?.b?.c
+local m = { b = {} }
+m?.b?.c
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::Lua, lua_source),
+        vec![Value::Int(7), Value::Null]
+    );
+
+    let scheme_source = r#"
+(define a (hash (b (hash (c 7)))))
+a?.b?.c
+(define m (hash (b (hash))))
+m?.b?.c
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::Scheme, scheme_source),
+        vec![Value::Int(7), Value::Null]
     );
 }
