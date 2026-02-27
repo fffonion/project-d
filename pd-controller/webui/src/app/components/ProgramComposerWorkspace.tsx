@@ -1,0 +1,206 @@
+import type { DragEvent } from "react";
+import {
+  Background,
+  Controls,
+  MiniMap,
+  ReactFlow,
+  type Connection,
+  type EdgeChange,
+  type NodeChange,
+  type ReactFlowInstance,
+  type Viewport
+} from "@xyflow/react";
+
+import { nodeTypes } from "@/app/components/BlockNode";
+import { GeneratedCodePanel } from "@/app/components/GeneratedCodePanel";
+import { ProgramPalette } from "@/app/components/ProgramPalette";
+import type { FlowEdge, FlowNode, SourceFlavor, UiBlockDefinition, UiSourceBundle } from "@/app/types";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+
+type ProgramComposerWorkspaceProps = {
+  isCodeEditMode: boolean;
+  onExitCodeEditMode: () => void;
+  onEnterCodeEditMode: () => void;
+  source: UiSourceBundle;
+  activeFlavor: SourceFlavor;
+  rendering: boolean;
+  onFlavorChange: (value: SourceFlavor) => void;
+  onSourceChange: (flavor: SourceFlavor, value: string) => void;
+  selectedProgramId: string | null;
+  selectedVersion: number | null;
+  graphCanvasRevision: number;
+  nodes: FlowNode[];
+  edges: FlowEdge[];
+  onNodesChange: (changes: NodeChange<FlowNode>[]) => void;
+  onEdgesChange: (changes: EdgeChange<FlowEdge>[]) => void;
+  onConnect: (connection: Connection) => void;
+  onInit: (instance: ReactFlowInstance<FlowNode, FlowEdge>) => void;
+  onMoveEnd: (viewport: Viewport) => void;
+  onCanvasDrop: (event: DragEvent<HTMLDivElement>) => void;
+  selectedNodeCount: number;
+  selectedEdgeCount: number;
+  paletteMinimized: boolean;
+  onTogglePaletteMinimized: () => void;
+  codePanelMinimized: boolean;
+  onToggleCodePanelMinimized: () => void;
+  definitions: UiBlockDefinition[];
+  search: string;
+  onSearchChange: (value: string) => void;
+  onPaletteDragStart: (event: DragEvent<HTMLDivElement>, blockId: string) => void;
+  onAddNode: (blockId: string) => void;
+};
+
+export function ProgramComposerWorkspace({
+  isCodeEditMode,
+  onExitCodeEditMode,
+  onEnterCodeEditMode,
+  source,
+  activeFlavor,
+  rendering,
+  onFlavorChange,
+  onSourceChange,
+  selectedProgramId,
+  selectedVersion,
+  graphCanvasRevision,
+  nodes,
+  edges,
+  onNodesChange,
+  onEdgesChange,
+  onConnect,
+  onInit,
+  onMoveEnd,
+  onCanvasDrop,
+  selectedNodeCount,
+  selectedEdgeCount,
+  paletteMinimized,
+  onTogglePaletteMinimized,
+  codePanelMinimized,
+  onToggleCodePanelMinimized,
+  definitions,
+  search,
+  onSearchChange,
+  onPaletteDragStart,
+  onAddNode
+}: ProgramComposerWorkspaceProps) {
+  if (isCodeEditMode) {
+    return (
+      <Card className="border-slate-200/80 bg-white/90 shadow-xl backdrop-blur">
+        <CardHeader>
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <CardTitle>Code</CardTitle>
+              <CardDescription>
+                Code edit mode. This version is saved as source-only and does not keep flow graph state.
+              </CardDescription>
+            </div>
+            <Button variant="outline" onClick={onExitCodeEditMode}>
+              Exit Edit
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          <GeneratedCodePanel
+            rendering={rendering}
+            activeFlavor={activeFlavor}
+            source={source}
+            onFlavorChange={onFlavorChange}
+            readOnly={false}
+            editorHeight="calc(100vh - 360px)"
+            onCodeChange={onSourceChange}
+            showHeader={false}
+          />
+        </CardContent>
+      </Card>
+    );
+  }
+
+  return (
+    <>
+      <div className="relative overflow-hidden rounded-xl border border-slate-800 bg-slate-950 text-slate-100 shadow-xl">
+        <div
+          className="h-[calc(100vh-290px)] min-h-[760px] w-full"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={onCanvasDrop}
+        >
+          <ReactFlow<FlowNode, FlowEdge>
+            key={`${selectedProgramId ?? "none"}:${selectedVersion ?? 0}:${graphCanvasRevision}`}
+            nodes={nodes}
+            edges={edges}
+            nodeTypes={nodeTypes}
+            onNodesChange={onNodesChange}
+            onEdgesChange={onEdgesChange}
+            onConnect={onConnect}
+            onInit={onInit}
+            onMoveEnd={(_, viewport) => onMoveEnd(viewport)}
+            minZoom={0.2}
+            maxZoom={2}
+            fitView
+            fitViewOptions={{ padding: 0.35 }}
+            defaultEdgeOptions={{
+              type: "smoothstep",
+              animated: true,
+              style: { stroke: "#22d3ee", strokeWidth: 2 }
+            }}
+          >
+            <Background color="#1e293b" gap={22} size={1} />
+            <MiniMap
+              position="bottom-left"
+              className="!bg-slate-900"
+              nodeColor="#334155"
+              maskColor="rgba(15, 23, 42, 0.45)"
+            />
+            <Controls position="bottom-right" className="!bg-slate-900 !text-slate-200" />
+          </ReactFlow>
+        </div>
+
+        <div className="pointer-events-none absolute left-4 top-4 z-20 hidden xl:block">
+          <ProgramPalette
+            floating
+            minimized={paletteMinimized}
+            onToggleMinimized={onTogglePaletteMinimized}
+            definitions={definitions}
+            search={search}
+            onSearchChange={onSearchChange}
+            onPaletteDragStart={onPaletteDragStart}
+            onAddNode={onAddNode}
+          />
+        </div>
+
+        <div className="pointer-events-none absolute right-4 top-4 z-20 hidden xl:block">
+          <GeneratedCodePanel
+            floating
+            minimized={codePanelMinimized}
+            onToggleMinimized={onToggleCodePanelMinimized}
+            rendering={rendering}
+            activeFlavor={activeFlavor}
+            source={source}
+            onFlavorChange={onFlavorChange}
+            onEdit={onEnterCodeEditMode}
+          />
+        </div>
+
+        <div className="absolute bottom-0 left-0 right-0 border-t border-slate-800 bg-slate-900/70 px-3 py-2 text-xs text-slate-300">
+          nodes={nodes.length} edges={edges.length} selected_nodes={selectedNodeCount} selected_edges={selectedEdgeCount}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 gap-4 xl:hidden">
+        <ProgramPalette
+          definitions={definitions}
+          search={search}
+          onSearchChange={onSearchChange}
+          onPaletteDragStart={onPaletteDragStart}
+          onAddNode={onAddNode}
+        />
+        <GeneratedCodePanel
+          rendering={rendering}
+          activeFlavor={activeFlavor}
+          source={source}
+          onFlavorChange={onFlavorChange}
+          onEdit={onEnterCodeEditMode}
+        />
+      </div>
+    </>
+  );
+}
