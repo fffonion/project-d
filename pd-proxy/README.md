@@ -48,7 +48,7 @@ instead of registering host functions one-by-one.
 
 `pd-proxy/examples/build_sample_program.rs` now:
 
-1. Reads source from hardcoded path `pd-proxy/examples/sample_proxy_program.rss`
+1. Reads source from default path `examples/sample_proxy_program.rss` (resolved from the `pd-proxy` crate root)
 2. Compiles it with `vm::compile_source_file` (extension-driven flavor detection)
 3. Encodes bytecode and uploads to `http://127.0.0.1:8081/program`
 

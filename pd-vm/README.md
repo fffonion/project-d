@@ -130,12 +130,12 @@ Scheme loop forms include `(while condition body...)` and Guile-style
 JavaScript/Lua external declarations can use module forms (`import ...` / `require(...)`); calls
 to unresolved names are treated as host externs in those flavors.
 
-## Trace JIT (x86_64 first)
+## Trace JIT (x86_64 + aarch64)
 
 The VM now includes a trace-based JIT path inspired by LuaJIT's hot-loop tracing model:
 - hot bytecode loop heads are detected
 - a straight-line trace is recorded from that root
-- x86_64 machine code is emitted per hot trace and invoked by the VM
+- native machine code is emitted per hot trace and invoked by the VM
 - the native bridge executes trace semantics without bytecode re-decoding
 - unsupported patterns fall back to interpreter and are tracked as NYI
 
@@ -144,7 +144,7 @@ Current NYI in trace compiler:
 - `br` to non-root targets (only loop-back jump to trace root is supported)
 - backward `brfalse` targets (only forward guard exits are supported)
 - traces longer than configured max trace length
-- non-`x86_64` targets (first implementation focus)
+- targets outside native-JIT support (`x86_64` Windows/Unix-non-macOS, `aarch64` Linux/macOS)
 
 ## Run examples
 
@@ -186,7 +186,7 @@ cargo test -p pd-vm --test perf_tests -- --ignored --nocapture
 Includes:
 - VM creation/cleanup speed and RSS delta
 - compiler speed and RSS delta
-- JIT native machine code execution verification on x86_64
+- JIT native machine code execution verification on supported native targets
 
 ### Debugger mode
 
@@ -207,5 +207,5 @@ Useful `pdb` commands: `break`, `break line`, `step`, `next`, `out`, `stack`, `l
 Try it with integration tests:
 
 ```powershell
-cargo test -p pd-vm --test demo_migration_tests
+cargo test -p pd-vm --test example_tests
 ```
