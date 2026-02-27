@@ -159,6 +159,12 @@ pub struct ClosureExpr {
 }
 
 #[derive(Clone, Debug)]
+pub enum MatchPattern {
+    Int(i64),
+    String(String),
+}
+
+#[derive(Clone, Debug)]
 pub enum Expr {
     Int(i64),
     Bool(bool),
@@ -176,6 +182,13 @@ pub enum Expr {
     Lt(Box<Expr>, Box<Expr>),
     Gt(Box<Expr>, Box<Expr>),
     Var(u8),
+    Match {
+        value_slot: u8,
+        result_slot: u8,
+        value: Box<Expr>,
+        arms: Vec<(MatchPattern, Expr)>,
+        default: Box<Expr>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -660,6 +673,43 @@ impl Compiler {
             }
             Expr::Var(index) => {
                 self.assembler.ldloc(*index);
+            }
+            Expr::Match {
+                value_slot,
+                result_slot,
+                value,
+                arms,
+                default,
+            } => {
+                self.compile_expr(value)?;
+                self.assembler.stloc(*value_slot);
+                let end_label = self.fresh_label("match_end");
+                for (pattern, arm_expr) in arms {
+                    let next_label = self.fresh_label("match_next");
+                    self.assembler.ldloc(*value_slot);
+                    match pattern {
+                        MatchPattern::Int(v) => {
+                            self.assembler.push_const(Value::Int(*v));
+                        }
+                        MatchPattern::String(v) => {
+                            self.assembler.push_const(Value::String(v.clone()));
+                        }
+                    }
+                    self.assembler.ceq();
+                    self.assembler.brfalse_label(&next_label);
+                    self.compile_expr(arm_expr)?;
+                    self.assembler.stloc(*result_slot);
+                    self.assembler.br_label(&end_label);
+                    self.assembler
+                        .label(&next_label)
+                        .map_err(CompileError::Assembler)?;
+                }
+                self.compile_expr(default)?;
+                self.assembler.stloc(*result_slot);
+                self.assembler
+                    .label(&end_label)
+                    .map_err(CompileError::Assembler)?;
+                self.assembler.ldloc(*result_slot);
             }
         }
         Ok(())

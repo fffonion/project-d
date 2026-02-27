@@ -1,0 +1,178 @@
+mod common;
+use common::*;
+
+#[test]
+fn arithmetic_works() {
+    let constants = vec![Value::Int(2), Value::Int(3)];
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.ldc(1);
+    bc.add();
+    bc.ret();
+
+    let program = Program::new(constants, bc.finish());
+    let mut vm = Vm::new(program);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(5)]);
+}
+
+#[test]
+fn shift_ops_and_msil_literals_work() {
+    let source = r#"
+        ldc 3
+        ldc 2
+        shl
+        ldc 1
+        shr
+        ret
+    "#;
+
+    let program = assemble(source).expect("assemble should succeed");
+    let mut vm = Vm::new(program);
+    let status = vm.run().expect("vm should run");
+
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(6)]);
+}
+
+#[test]
+fn arithmetic_supports_float_and_mixed_numeric() {
+    let constants = vec![Value::Float(1.5), Value::Int(2), Value::Float(8.0)];
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.ldc(1);
+    bc.add();
+    bc.ldc(2);
+    bc.clt();
+    bc.ret();
+
+    let program = Program::new(constants, bc.finish());
+    let mut vm = Vm::new(program);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Bool(true)]);
+}
+
+#[test]
+fn brfalse_skips_block() {
+    let constants = vec![Value::Bool(false), Value::Int(1), Value::Int(2)];
+    let mut bc = BytecodeBuilder::new();
+    bc.ldc(0);
+    bc.brfalse(16);
+    bc.ldc(1);
+    bc.ret();
+    bc.ldc(2);
+    bc.ret();
+
+    let program = Program::new(constants, bc.finish());
+    let mut vm = Vm::new(program);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(2)]);
+}
+
+#[test]
+fn call_can_yield_and_resume() {
+    let mut bc = BytecodeBuilder::new();
+    bc.call(0, 0);
+    bc.ret();
+
+    let program = Program::new(Vec::new(), bc.finish());
+    let mut vm = Vm::new(program);
+    vm.register_function(Box::new(YieldOnce { yielded: false }));
+
+    let status = vm.run().expect("first run should yield");
+    assert_eq!(status, VmStatus::Yielded);
+
+    let status = vm.resume().expect("resume should halt");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(42)]);
+}
+
+#[test]
+fn assembler_resolves_labels() {
+    let mut asm = Assembler::new();
+    asm.push_const(Value::Bool(false));
+    asm.brfalse_label("target");
+    asm.push_const(Value::Int(1));
+    asm.ret();
+    asm.label("target").expect("label should register");
+    asm.push_const(Value::Int(2));
+    asm.ret();
+
+    let program = asm.finish_program().expect("assembler should finish");
+    let mut vm = Vm::new(program);
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(2)]);
+}
+
+#[test]
+fn assemble_text_program() {
+    let source = r#"
+        ldc 2
+        ldc 3
+        add
+        ret
+    "#;
+
+    let program = assemble(source).expect("assemble should succeed");
+    let mut vm = Vm::new(program);
+    let status = vm.run().expect("vm should run");
+
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(5)]);
+}
+
+#[test]
+fn assemble_text_with_labels() {
+    let source = r#"
+        ldc false
+        brfalse target
+        ldc 1
+        ret
+        .label target
+        ldc 2
+        ret
+    "#;
+
+    let program = assemble(source).expect("assemble should succeed");
+    let mut vm = Vm::new(program);
+    let status = vm.run().expect("vm should run");
+
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(2)]);
+}
+
+#[test]
+fn assemble_text_with_data_and_string() {
+    let source = r#"
+        .data
+        string greeting "hello"
+        .code
+        ldc greeting
+        ret
+    "#;
+
+    let program = assemble(source).expect("assemble should succeed");
+    let mut vm = Vm::new(program);
+    let status = vm.run().expect("vm should run");
+
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::String("hello".to_string())]);
+}
+
+#[test]
+fn assemble_rejects_legacy_opcode_literals() {
+    let source = r#"
+        const 1
+        halt
+    "#;
+    let err = assemble(source).expect_err("legacy opcodes should be rejected");
+    assert!(err.message.contains("unknown opcode"));
+}

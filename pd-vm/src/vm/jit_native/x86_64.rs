@@ -2,6 +2,7 @@ use super::super::{Program, Value, Vm, VmError, VmResult};
 use super::{
     NativeBackend, STATUS_CONTINUE, STATUS_ERROR, STATUS_HALTED, STATUS_TRACE_EXIT, STATUS_YIELDED,
 };
+use crate::builtins::BuiltinFunction;
 use std::sync::OnceLock;
 
 pub(super) struct X86_64Backend;
@@ -72,9 +73,12 @@ struct ValueLayout {
     float_tag: u32,
     bool_tag: u32,
     string_tag: u32,
+    array_tag: u32,
     int_payload_offset: i32,
     float_payload_offset: i32,
     bool_payload_offset: i32,
+    array_ptr_offset: i32,
+    array_len_offset: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -191,7 +195,7 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 argc,
                 call_ip,
             } => {
-                emit_native_step_call_inline(&mut code, *index, *argc, *call_ip)?;
+                emit_native_step_call_inline(&mut code, layout, *index, *argc, *call_ip)?;
                 emit_native_status_check(&mut code, &mut jump_patches);
             }
             crate::jit::TraceStep::GuardFalse { exit_ip } => {
@@ -204,6 +208,16 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                 emit_native_step_guard_false_inline(&mut code, layout, exit_ip)?;
                 emit_native_status_check(&mut code, &mut jump_patches);
             }
+            crate::jit::TraceStep::JumpToIp { target_ip } => {
+                let target_ip = u32::try_from(*target_ip).map_err(|_| {
+                    VmError::JitNative(format!(
+                        "trace jump target ip {} exceeds u32 immediate range",
+                        target_ip
+                    ))
+                })?;
+                emit_native_step_jump_to_ip_inline(&mut code, layout, target_ip)?;
+                emit_native_status_check(&mut code, &mut jump_patches);
+            }
             crate::jit::TraceStep::JumpToRoot => {
                 let root_ip = u32::try_from(trace.root_ip).map_err(|_| {
                     VmError::JitNative(format!(
@@ -211,7 +225,7 @@ fn emit_native_trace_bytes(trace: &crate::jit::JitTrace) -> VmResult<Vec<u8>> {
                         trace.root_ip
                     ))
                 })?;
-                emit_native_step_jump_to_root_inline(&mut code, layout, root_ip)?;
+                emit_native_step_jump_to_ip_inline(&mut code, layout, root_ip)?;
                 emit_native_status_check(&mut code, &mut jump_patches);
             }
             crate::jit::TraceStep::Ret => {
@@ -879,34 +893,36 @@ fn emit_native_step_shift_inline(
 
 fn emit_native_step_pop_inline(code: &mut Vec<u8>, layout: NativeStackLayout) -> VmResult<()> {
     let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
-    let stack_ptr_offset = vec_ptr_disp(layout.vm_stack_offset, layout.stack_vec)?;
-
-    code.extend_from_slice(&[0x48, 0x8B, 0x8B]); // mov rcx, [rbx+disp32]
-    code.extend_from_slice(&stack_len_offset.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x83, 0xF9, 0x01]); // cmp rcx, 1
-    let underflow = emit_jcc_rel32(code, [0x0F, 0x82]); // jb
-    code.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
-    code.extend_from_slice(&[0x48, 0x8B, 0x93]); // mov rdx, [rbx+disp32]
-    code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
-    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
-    code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x8D, 0x3C, 0x02]); // lea rdi, [rdx+rax]
+    emit_stack_top_setup(code, layout, 1)?;
     emit_load_tag_eax_from_rdi(code, layout.value)?;
-    code.extend_from_slice(&[0x3D]); // cmp eax, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let string_pop = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let primitive_label = code.len();
+    code.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
     code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     emit_status_continue(code);
-    let ok_done = emit_jmp_rel32(code);
+    let done = emit_jmp_rel32(code);
 
-    let error_label = code.len();
-    emit_status_error(code);
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(jit_native_pop_bridge as *const (), "pop helper")?;
+    emit_vm_helper_call0(code, helper_addr);
     let done_label = code.len();
-    patch_rel32(code, underflow, error_label)?;
-    patch_rel32(code, string_pop, error_label)?;
-    patch_rel32(code, ok_done, done_label)?;
+
+    patch_rel32(code, primitive, primitive_label)?;
+    patch_rel32(code, primitive_float, primitive_label)?;
+    patch_rel32(code, primitive_bool, primitive_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -917,10 +933,10 @@ fn emit_native_step_dup_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
 
     code.extend_from_slice(&[0x48, 0x8B, 0x8B]); // mov rcx, [rbx+disp32]
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
-    code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32]
-    code.extend_from_slice(&stack_cap_offset.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x83, 0xF9, 0x01]); // cmp rcx, 1
     let underflow = emit_jcc_rel32(code, [0x0F, 0x82]); // jb
+    code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32]
+    code.extend_from_slice(&stack_cap_offset.to_le_bytes());
     code.extend_from_slice(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
     let no_cap = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
     code.extend_from_slice(&[0x48, 0x8B, 0x93]); // mov rdx, [rbx+disp32]
@@ -930,9 +946,18 @@ fn emit_native_step_dup_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     code.extend_from_slice(&layout.value.size.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x8D, 0x34, 0x02]); // lea rsi, [rdx+rax]
     emit_load_tag_edx_from_rsi(code, layout.value)?;
-    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let string_dup = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let primitive_label = code.len();
     code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
@@ -942,15 +967,20 @@ fn emit_native_step_dup_inline(code: &mut Vec<u8>, layout: NativeStackLayout) ->
     code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     emit_status_continue(code);
-    let ok_done = emit_jmp_rel32(code);
+    let done = emit_jmp_rel32(code);
 
-    let error_label = code.len();
-    emit_status_error(code);
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(jit_native_dup_bridge as *const (), "dup helper")?;
+    emit_vm_helper_call0(code, helper_addr);
     let done_label = code.len();
-    patch_rel32(code, underflow, error_label)?;
-    patch_rel32(code, no_cap, error_label)?;
-    patch_rel32(code, string_dup, error_label)?;
-    patch_rel32(code, ok_done, done_label)?;
+
+    patch_rel32(code, underflow, fallback_label)?;
+    patch_rel32(code, no_cap, fallback_label)?;
+    patch_rel32(code, primitive, primitive_label)?;
+    patch_rel32(code, primitive_float, primitive_label)?;
+    patch_rel32(code, primitive_bool, primitive_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -976,43 +1006,59 @@ fn emit_native_step_ldc_inline(
     code.extend_from_slice(&const_index.to_le_bytes());
     code.extend_from_slice(&[0x4C, 0x39, 0xC0]); // cmp rax, r8
     let bad_index = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
+
     code.extend_from_slice(&[0x48, 0x8B, 0x8B]); // mov rcx, [rbx+disp32] ; stack len
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
-    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; stack cap
+    code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32] ; stack cap
     code.extend_from_slice(&stack_cap_offset.to_le_bytes());
-    code.extend_from_slice(&[0x4C, 0x39, 0xC9]); // cmp rcx, r9
+    code.extend_from_slice(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
     let no_cap = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
-    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; constants ptr
+
+    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; stack ptr
+    code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x8B, 0x93]); // mov r10, [rbx+disp32] ; constants ptr
     code.extend_from_slice(&constants_ptr_offset.to_le_bytes());
     code.push(0xB8); // mov eax, imm32
     code.extend_from_slice(&const_index.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x49, 0x8D, 0x34, 0x01]); // lea rsi, [r9+rax]
+    code.extend_from_slice(&[0x49, 0x8D, 0x34, 0x02]); // lea rsi, [r10+rax]
     emit_load_tag_edx_from_rsi(code, layout.value)?;
-    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let string_const = emit_jcc_rel32(code, [0x0F, 0x84]); // je
-    code.extend_from_slice(&[0x48, 0x8B, 0x93]); // mov rdx, [rbx+disp32] ; stack ptr
-    code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let primitive_label = code.len();
     code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x8D, 0x3C, 0x02]); // lea rdi, [rdx+rax]
+    code.extend_from_slice(&[0x49, 0x8D, 0x3C, 0x01]); // lea rdi, [r9+rax]
     emit_copy_value_rsi_to_rdi(code, layout.value)?;
     code.extend_from_slice(&[0x48, 0xFF, 0xC1]); // inc rcx
     code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     emit_status_continue(code);
-    let ok_done = emit_jmp_rel32(code);
+    let done = emit_jmp_rel32(code);
 
-    let error_label = code.len();
-    emit_status_error(code);
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(jit_native_ldc_bridge as *const (), "ldc helper")?;
+    emit_vm_helper_call1_u32(code, helper_addr, const_index);
     let done_label = code.len();
-    patch_rel32(code, bad_index, error_label)?;
-    patch_rel32(code, no_cap, error_label)?;
-    patch_rel32(code, string_const, error_label)?;
-    patch_rel32(code, ok_done, done_label)?;
+
+    patch_rel32(code, bad_index, fallback_label)?;
+    patch_rel32(code, no_cap, fallback_label)?;
+    patch_rel32(code, primitive, primitive_label)?;
+    patch_rel32(code, primitive_float, primitive_label)?;
+    patch_rel32(code, primitive_bool, primitive_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -1021,11 +1067,11 @@ fn emit_native_step_ldloc_inline(
     layout: NativeStackLayout,
     local_index: u8,
 ) -> VmResult<()> {
-    let locals_len_offset = vec_len_disp(layout.vm_locals_offset, layout.stack_vec)?;
-    let locals_ptr_offset = vec_ptr_disp(layout.vm_locals_offset, layout.stack_vec)?;
     let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
     let stack_ptr_offset = vec_ptr_disp(layout.vm_stack_offset, layout.stack_vec)?;
     let stack_cap_offset = vec_cap_disp(layout.vm_stack_offset, layout.stack_vec)?;
+    let locals_len_offset = vec_len_disp(layout.vm_locals_offset, layout.stack_vec)?;
+    let locals_ptr_offset = vec_ptr_disp(layout.vm_locals_offset, layout.stack_vec)?;
 
     code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32] ; locals len
     code.extend_from_slice(&locals_len_offset.to_le_bytes());
@@ -1033,43 +1079,59 @@ fn emit_native_step_ldloc_inline(
     code.extend_from_slice(&(local_index as u32).to_le_bytes());
     code.extend_from_slice(&[0x4C, 0x39, 0xC0]); // cmp rax, r8
     let bad_index = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
+
     code.extend_from_slice(&[0x48, 0x8B, 0x8B]); // mov rcx, [rbx+disp32] ; stack len
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
-    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; stack cap
+    code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32] ; stack cap
     code.extend_from_slice(&stack_cap_offset.to_le_bytes());
-    code.extend_from_slice(&[0x4C, 0x39, 0xC9]); // cmp rcx, r9
+    code.extend_from_slice(&[0x4C, 0x39, 0xC1]); // cmp rcx, r8
     let no_cap = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
-    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; locals ptr
+
+    code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; stack ptr
+    code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x8B, 0x93]); // mov r10, [rbx+disp32] ; locals ptr
     code.extend_from_slice(&locals_ptr_offset.to_le_bytes());
     code.push(0xB8); // mov eax, imm32
     code.extend_from_slice(&(local_index as u32).to_le_bytes());
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x49, 0x8D, 0x34, 0x01]); // lea rsi, [r9+rax]
+    code.extend_from_slice(&[0x49, 0x8D, 0x34, 0x02]); // lea rsi, [r10+rax]
     emit_load_tag_edx_from_rsi(code, layout.value)?;
-    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let string_local = emit_jcc_rel32(code, [0x0F, 0x84]); // je
-    code.extend_from_slice(&[0x48, 0x8B, 0x93]); // mov rdx, [rbx+disp32] ; stack ptr
-    code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let primitive_label = code.len();
     code.extend_from_slice(&[0x48, 0x89, 0xC8]); // mov rax, rcx
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x8D, 0x3C, 0x02]); // lea rdi, [rdx+rax]
+    code.extend_from_slice(&[0x49, 0x8D, 0x3C, 0x01]); // lea rdi, [r9+rax]
     emit_copy_value_rsi_to_rdi(code, layout.value)?;
     code.extend_from_slice(&[0x48, 0xFF, 0xC1]); // inc rcx
     code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     emit_status_continue(code);
-    let ok_done = emit_jmp_rel32(code);
+    let done = emit_jmp_rel32(code);
 
-    let error_label = code.len();
-    emit_status_error(code);
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(jit_native_ldloc_bridge as *const (), "ldloc helper")?;
+    emit_vm_helper_call1_u32(code, helper_addr, local_index as u32);
     let done_label = code.len();
-    patch_rel32(code, bad_index, error_label)?;
-    patch_rel32(code, no_cap, error_label)?;
-    patch_rel32(code, string_local, error_label)?;
-    patch_rel32(code, ok_done, done_label)?;
+
+    patch_rel32(code, bad_index, fallback_label)?;
+    patch_rel32(code, no_cap, fallback_label)?;
+    patch_rel32(code, primitive, primitive_label)?;
+    patch_rel32(code, primitive_float, primitive_label)?;
+    patch_rel32(code, primitive_bool, primitive_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -1078,57 +1140,87 @@ fn emit_native_step_stloc_inline(
     layout: NativeStackLayout,
     local_index: u8,
 ) -> VmResult<()> {
-    let locals_len_offset = vec_len_disp(layout.vm_locals_offset, layout.stack_vec)?;
-    let locals_ptr_offset = vec_ptr_disp(layout.vm_locals_offset, layout.stack_vec)?;
     let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
     let stack_ptr_offset = vec_ptr_disp(layout.vm_stack_offset, layout.stack_vec)?;
+    let locals_len_offset = vec_len_disp(layout.vm_locals_offset, layout.stack_vec)?;
+    let locals_ptr_offset = vec_ptr_disp(layout.vm_locals_offset, layout.stack_vec)?;
 
     code.extend_from_slice(&[0x48, 0x8B, 0x8B]); // mov rcx, [rbx+disp32] ; stack len
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x83, 0xF9, 0x01]); // cmp rcx, 1
     let underflow = emit_jcc_rel32(code, [0x0F, 0x82]); // jb
+
     code.extend_from_slice(&[0x4C, 0x8B, 0x83]); // mov r8, [rbx+disp32] ; locals len
     code.extend_from_slice(&locals_len_offset.to_le_bytes());
     code.push(0xB8); // mov eax, imm32
     code.extend_from_slice(&(local_index as u32).to_le_bytes());
     code.extend_from_slice(&[0x4C, 0x39, 0xC0]); // cmp rax, r8
     let bad_index = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
+
     code.extend_from_slice(&[0x48, 0x8B, 0x93]); // mov rdx, [rbx+disp32] ; stack ptr
     code.extend_from_slice(&stack_ptr_offset.to_le_bytes());
     code.extend_from_slice(&[0x48, 0x8D, 0x41, 0xFF]); // lea rax, [rcx-1]
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x48, 0x8D, 0x34, 0x02]); // lea rsi, [rdx+rax]
-    emit_load_tag_edx_from_rsi(code, layout.value)?;
-    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let src_string = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x48, 0x8D, 0x34, 0x02]); // lea rsi, [rdx+rax] ; src(top)
+
     code.extend_from_slice(&[0x4C, 0x8B, 0x8B]); // mov r9, [rbx+disp32] ; locals ptr
     code.extend_from_slice(&locals_ptr_offset.to_le_bytes());
     code.push(0xB8); // mov eax, imm32
     code.extend_from_slice(&(local_index as u32).to_le_bytes());
     code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
     code.extend_from_slice(&layout.value.size.to_le_bytes());
-    code.extend_from_slice(&[0x49, 0x8D, 0x3C, 0x01]); // lea rdi, [r9+rax]
+    code.extend_from_slice(&[0x49, 0x8D, 0x3C, 0x01]); // lea rdi, [r9+rax] ; dst(local)
+
+    emit_load_tag_edx_from_rsi(code, layout.value)?;
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let src_primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let src_primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let src_primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let src_primitive_label = code.len();
     emit_load_tag_eax_from_rdi(code, layout.value)?;
-    code.extend_from_slice(&[0x3D]); // cmp eax, string_tag
-    code.extend_from_slice(&layout.value.string_tag.to_le_bytes());
-    let dst_string = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let dst_primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let dst_primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let dst_primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_dst = emit_jmp_rel32(code);
+
+    let dst_primitive_label = code.len();
     emit_copy_value_rsi_to_rdi(code, layout.value)?;
     code.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx
     code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
     code.extend_from_slice(&stack_len_offset.to_le_bytes());
     emit_status_continue(code);
-    let ok_done = emit_jmp_rel32(code);
+    let done = emit_jmp_rel32(code);
 
-    let error_label = code.len();
-    emit_status_error(code);
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(jit_native_stloc_bridge as *const (), "stloc helper")?;
+    emit_vm_helper_call1_u32(code, helper_addr, local_index as u32);
     let done_label = code.len();
-    patch_rel32(code, underflow, error_label)?;
-    patch_rel32(code, bad_index, error_label)?;
-    patch_rel32(code, src_string, error_label)?;
-    patch_rel32(code, dst_string, error_label)?;
-    patch_rel32(code, ok_done, done_label)?;
+
+    patch_rel32(code, underflow, fallback_label)?;
+    patch_rel32(code, bad_index, fallback_label)?;
+    patch_rel32(code, src_primitive, src_primitive_label)?;
+    patch_rel32(code, src_primitive_float, src_primitive_label)?;
+    patch_rel32(code, src_primitive_bool, src_primitive_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, dst_primitive, dst_primitive_label)?;
+    patch_rel32(code, dst_primitive_float, dst_primitive_label)?;
+    patch_rel32(code, dst_primitive_bool, dst_primitive_label)?;
+    patch_rel32(code, fallback_from_dst, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -1283,13 +1375,13 @@ fn emit_native_step_guard_false_inline(
     Ok(())
 }
 
-fn emit_native_step_jump_to_root_inline(
+fn emit_native_step_jump_to_ip_inline(
     code: &mut Vec<u8>,
     layout: NativeStackLayout,
-    root_ip: u32,
+    target_ip: u32,
 ) -> VmResult<()> {
     code.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
-    code.extend_from_slice(&(root_ip as u64).to_le_bytes());
+    code.extend_from_slice(&(target_ip as u64).to_le_bytes());
     code.extend_from_slice(&[0x48, 0x89, 0x83]); // mov [rbx+disp32], rax
     code.extend_from_slice(&layout.vm_ip_offset.to_le_bytes());
     code.push(0xB8); // mov eax, imm32
@@ -1302,18 +1394,107 @@ fn emit_native_step_ret_inline(code: &mut Vec<u8>) {
     code.extend_from_slice(&STATUS_HALTED.to_le_bytes());
 }
 
+fn helper_ptr_to_u64(ptr: *const (), name: &str) -> VmResult<u64> {
+    let addr = ptr as usize;
+    u64::try_from(addr)
+        .map_err(|_| VmError::JitNative(format!("native {name} pointer exceeds 64-bit range")))
+}
+
+fn emit_vm_helper_call0(code: &mut Vec<u8>, helper_addr: u64) {
+    #[cfg(target_os = "windows")]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+    }
+    code.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
+    code.extend_from_slice(&helper_addr.to_le_bytes());
+    code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+}
+
+fn emit_vm_helper_call1_u32(code: &mut Vec<u8>, helper_addr: u64, arg: u32) {
+    #[cfg(target_os = "windows")]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xD9]); // mov rcx, rbx
+        code.push(0xBA); // mov edx, imm32
+        code.extend_from_slice(&arg.to_le_bytes());
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        code.extend_from_slice(&[0x48, 0x89, 0xDF]); // mov rdi, rbx
+        code.push(0xBE); // mov esi, imm32
+        code.extend_from_slice(&arg.to_le_bytes());
+    }
+    code.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
+    code.extend_from_slice(&helper_addr.to_le_bytes());
+    code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+}
+
 fn emit_native_step_call_inline(
     code: &mut Vec<u8>,
+    layout: NativeStackLayout,
     index: u16,
     argc: u8,
     call_ip: usize,
 ) -> VmResult<()> {
+    if let Some(builtin) = BuiltinFunction::from_call_index(index)
+        && argc == builtin.arity()
+    {
+        match builtin {
+            BuiltinFunction::Len => {
+                return emit_native_builtin_len_fastpath_inline(code, layout);
+            }
+            BuiltinFunction::Get => {
+                return emit_native_builtin_get_fastpath_inline(code, layout);
+            }
+            BuiltinFunction::Set => {
+                return emit_native_builtin_set_fastpath_inline(code, layout);
+            }
+            _ => {
+                let helper_addr = match builtin {
+                    BuiltinFunction::Slice => helper_ptr_to_u64(
+                        jit_native_builtin_slice_bridge as *const (),
+                        "builtin slice helper",
+                    )?,
+                    BuiltinFunction::Concat => helper_ptr_to_u64(
+                        jit_native_builtin_concat_bridge as *const (),
+                        "builtin concat helper",
+                    )?,
+                    BuiltinFunction::Set => helper_ptr_to_u64(
+                        jit_native_builtin_set_bridge as *const (),
+                        "builtin set helper",
+                    )?,
+                    BuiltinFunction::ArrayNew => helper_ptr_to_u64(
+                        jit_native_builtin_array_new_bridge as *const (),
+                        "builtin array_new helper",
+                    )?,
+                    BuiltinFunction::ArrayPush => helper_ptr_to_u64(
+                        jit_native_builtin_array_push_bridge as *const (),
+                        "builtin array_push helper",
+                    )?,
+                    BuiltinFunction::MapNew => helper_ptr_to_u64(
+                        jit_native_builtin_map_new_bridge as *const (),
+                        "builtin map_new helper",
+                    )?,
+                    BuiltinFunction::Assert => helper_ptr_to_u64(
+                        jit_native_builtin_assert_bridge as *const (),
+                        "builtin assert helper",
+                    )?,
+                    _ => 0,
+                };
+                if helper_addr != 0 {
+                    emit_vm_helper_call0(code, helper_addr);
+                    return Ok(());
+                }
+            }
+        }
+    }
+
     let call_ip = u64::try_from(call_ip)
         .map_err(|_| VmError::JitNative("trace call_ip exceeds 64-bit range".to_string()))?;
-    let helper_addr = jit_native_call_bridge as *const () as usize;
-    let helper_addr = u64::try_from(helper_addr).map_err(|_| {
-        VmError::JitNative("native helper pointer exceeds 64-bit range".to_string())
-    })?;
+    let helper_addr = helper_ptr_to_u64(jit_native_call_bridge as *const (), "call helper")?;
 
     #[cfg(target_os = "windows")]
     {
@@ -1338,6 +1519,236 @@ fn emit_native_step_call_inline(
     code.extend_from_slice(&[0x48, 0xB8]); // mov rax, imm64
     code.extend_from_slice(&helper_addr.to_le_bytes());
     code.extend_from_slice(&[0xFF, 0xD0]); // call rax
+    Ok(())
+}
+
+fn emit_native_builtin_len_fastpath_inline(
+    code: &mut Vec<u8>,
+    layout: NativeStackLayout,
+) -> VmResult<()> {
+    emit_stack_top_setup(code, layout, 1)?;
+    emit_load_tag_eax_from_rdi(code, layout.value)?;
+    code.extend_from_slice(&[0x3D]); // cmp eax, array_tag
+    code.extend_from_slice(&layout.value.array_tag.to_le_bytes());
+    let fast = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let fast_label = code.len();
+    code.extend_from_slice(&[0x48, 0x8B, 0x87]); // mov rax, [rdi+disp32]
+    code.extend_from_slice(&layout.value.array_len_offset.to_le_bytes());
+    code.extend_from_slice(&[0x48, 0x89, 0x87]); // mov [rdi+disp32], rax
+    code.extend_from_slice(&layout.value.int_payload_offset.to_le_bytes());
+    emit_store_tag_rdi(code, layout.value, layout.value.int_tag)?;
+    emit_status_continue(code);
+    let done = emit_jmp_rel32(code);
+
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(
+        jit_native_builtin_len_bridge as *const (),
+        "builtin len helper",
+    )?;
+    emit_vm_helper_call0(code, helper_addr);
+    let done_label = code.len();
+
+    patch_rel32(code, fast, fast_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
+    Ok(())
+}
+
+fn emit_native_builtin_get_fastpath_inline(
+    code: &mut Vec<u8>,
+    layout: NativeStackLayout,
+) -> VmResult<()> {
+    let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
+    emit_stack_binary_setup(code, layout, 2)?;
+
+    emit_load_tag_edx_from_rsi(code, layout.value)?; // key tag
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let key_is_int = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let key_ok_label = code.len();
+    emit_load_tag_eax_from_rdi(code, layout.value)?; // container tag
+    code.extend_from_slice(&[0x3D]); // cmp eax, array_tag
+    code.extend_from_slice(&layout.value.array_tag.to_le_bytes());
+    let is_array = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_container = emit_jmp_rel32(code);
+
+    let array_ok_label = code.len();
+    code.extend_from_slice(&[0x4C, 0x8B, 0x86]); // mov r8, [rsi+disp32] ; index
+    code.extend_from_slice(&layout.value.int_payload_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+    let bad_index = emit_jcc_rel32(code, [0x0F, 0x88]); // js
+    code.extend_from_slice(&[0x4C, 0x8B, 0x8F]); // mov r9, [rdi+disp32] ; array len
+    code.extend_from_slice(&layout.value.array_len_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4D, 0x39, 0xC8]); // cmp r8, r9
+    let oob = emit_jcc_rel32(code, [0x0F, 0x83]); // jae
+    code.extend_from_slice(&[0x4C, 0x8B, 0x97]); // mov r10, [rdi+disp32] ; array ptr
+    code.extend_from_slice(&layout.value.array_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
+    code.extend_from_slice(&layout.value.size.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0x8D, 0x34, 0x02]); // lea rsi, [r10+rax] ; elem ptr
+
+    emit_load_tag_edx_from_rsi(code, layout.value)?;
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let elem_primitive = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let elem_primitive_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let elem_primitive_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_elem = emit_jmp_rel32(code);
+
+    let elem_ok_label = code.len();
+    emit_copy_value_rsi_to_rdi(code, layout.value)?; // overwrite container slot with result
+    code.extend_from_slice(&[0x48, 0xFF, 0xC9]); // dec rcx (pop key)
+    code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
+    code.extend_from_slice(&stack_len_offset.to_le_bytes());
+    emit_status_continue(code);
+    let done = emit_jmp_rel32(code);
+
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(
+        jit_native_builtin_get_bridge as *const (),
+        "builtin get helper",
+    )?;
+    emit_vm_helper_call0(code, helper_addr);
+    let done_label = code.len();
+
+    patch_rel32(code, key_is_int, key_ok_label)?;
+    patch_rel32(code, is_array, array_ok_label)?;
+    patch_rel32(code, elem_primitive, elem_ok_label)?;
+    patch_rel32(code, elem_primitive_float, elem_ok_label)?;
+    patch_rel32(code, elem_primitive_bool, elem_ok_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, fallback_from_container, fallback_label)?;
+    patch_rel32(code, bad_index, fallback_label)?;
+    patch_rel32(code, oob, fallback_label)?;
+    patch_rel32(code, fallback_from_elem, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
+    Ok(())
+}
+
+fn emit_native_builtin_set_fastpath_inline(
+    code: &mut Vec<u8>,
+    layout: NativeStackLayout,
+) -> VmResult<()> {
+    let stack_len_offset = vec_len_disp(layout.vm_stack_offset, layout.stack_vec)?;
+    emit_stack_binary_setup(code, layout, 3)?;
+
+    // Setup from emit_stack_binary_setup(min_len=3):
+    //   rsi = value slot (top)
+    //   rdi = key slot
+    //   rcx = stack len
+    //   rdx = stack ptr
+    // We only fast-path primitive value assignment into existing primitive array slots.
+
+    // Guard: value is primitive (int/float/bool).
+    emit_load_tag_edx_from_rsi(code, layout.value)?;
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let value_is_int = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let value_is_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x81, 0xFA]); // cmp edx, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let value_is_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback = emit_jmp_rel32(code);
+
+    let value_ok_label = code.len();
+
+    // Guard: key is int, and load index into r8.
+    emit_load_tag_eax_from_rdi(code, layout.value)?;
+    code.extend_from_slice(&[0x3D]); // cmp eax, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let key_is_int = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_key = emit_jmp_rel32(code);
+
+    let key_ok_label = code.len();
+    code.extend_from_slice(&[0x4C, 0x8B, 0x87]); // mov r8, [rdi+disp32] ; key index
+    code.extend_from_slice(&layout.value.int_payload_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4D, 0x85, 0xC0]); // test r8, r8
+    let bad_index = emit_jcc_rel32(code, [0x0F, 0x88]); // js
+
+    // Compute container slot pointer in r10 from key slot.
+    code.extend_from_slice(&[0x4C, 0x8D, 0x97]); // lea r10, [rdi+disp32]
+    code.extend_from_slice(&(-layout.value.size).to_le_bytes());
+
+    // Guard: container is array.
+    code.extend_from_slice(&[0x4C, 0x89, 0xD7]); // mov rdi, r10
+    emit_load_tag_eax_from_rdi(code, layout.value)?;
+    code.extend_from_slice(&[0x3D]); // cmp eax, array_tag
+    code.extend_from_slice(&layout.value.array_tag.to_le_bytes());
+    let is_array = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_container = emit_jmp_rel32(code);
+
+    let array_ok_label = code.len();
+    code.extend_from_slice(&[0x4D, 0x8B, 0x8A]); // mov r9, [r10+disp32] ; array len
+    code.extend_from_slice(&layout.value.array_len_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4D, 0x39, 0xC8]); // cmp r8, r9
+    let index_in_bounds = emit_jcc_rel32(code, [0x0F, 0x82]); // jb
+    // Keep append/overflow behavior in helper path to avoid capacity/drop hazards.
+    let fallback_from_oob_or_append = emit_jmp_rel32(code);
+
+    let replace_label = code.len();
+    code.extend_from_slice(&[0x4D, 0x8B, 0x9A]); // mov r11, [r10+disp32] ; array ptr
+    code.extend_from_slice(&layout.value.array_ptr_offset.to_le_bytes());
+    code.extend_from_slice(&[0x4C, 0x89, 0xC0]); // mov rax, r8
+    code.extend_from_slice(&[0x48, 0x69, 0xC0]); // imul rax, rax, imm32
+    code.extend_from_slice(&layout.value.size.to_le_bytes());
+    code.extend_from_slice(&[0x49, 0x8D, 0x3C, 0x03]); // lea rdi, [r11+rax] ; dst elem ptr
+
+    // Guard: existing element is primitive so overwrite is drop-safe.
+    emit_load_tag_eax_from_rdi(code, layout.value)?;
+    code.extend_from_slice(&[0x3D]); // cmp eax, int_tag
+    code.extend_from_slice(&layout.value.int_tag.to_le_bytes());
+    let dst_is_int = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, float_tag
+    code.extend_from_slice(&layout.value.float_tag.to_le_bytes());
+    let dst_is_float = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    code.extend_from_slice(&[0x3D]); // cmp eax, bool_tag
+    code.extend_from_slice(&layout.value.bool_tag.to_le_bytes());
+    let dst_is_bool = emit_jcc_rel32(code, [0x0F, 0x84]); // je
+    let fallback_from_dst = emit_jmp_rel32(code);
+
+    let replace_ok_label = code.len();
+    emit_copy_value_rsi_to_rdi(code, layout.value)?;
+    code.extend_from_slice(&[0x48, 0x83, 0xE9, 0x02]); // sub rcx, 2
+    code.extend_from_slice(&[0x48, 0x89, 0x8B]); // mov [rbx+disp32], rcx
+    code.extend_from_slice(&stack_len_offset.to_le_bytes());
+    emit_status_continue(code);
+    let done = emit_jmp_rel32(code);
+
+    let fallback_label = code.len();
+    let helper_addr = helper_ptr_to_u64(
+        jit_native_builtin_set_bridge as *const (),
+        "builtin set helper",
+    )?;
+    emit_vm_helper_call0(code, helper_addr);
+    let done_label = code.len();
+
+    patch_rel32(code, value_is_int, value_ok_label)?;
+    patch_rel32(code, value_is_float, value_ok_label)?;
+    patch_rel32(code, value_is_bool, value_ok_label)?;
+    patch_rel32(code, key_is_int, key_ok_label)?;
+    patch_rel32(code, is_array, array_ok_label)?;
+    patch_rel32(code, index_in_bounds, replace_label)?;
+    patch_rel32(code, dst_is_int, replace_ok_label)?;
+    patch_rel32(code, dst_is_float, replace_ok_label)?;
+    patch_rel32(code, dst_is_bool, replace_ok_label)?;
+    patch_rel32(code, fallback, fallback_label)?;
+    patch_rel32(code, fallback_from_key, fallback_label)?;
+    patch_rel32(code, bad_index, fallback_label)?;
+    patch_rel32(code, fallback_from_container, fallback_label)?;
+    patch_rel32(code, fallback_from_oob_or_append, fallback_label)?;
+    patch_rel32(code, fallback_from_dst, fallback_label)?;
+    patch_rel32(code, done, done_label)?;
     Ok(())
 }
 
@@ -1405,6 +1816,17 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     let int_b = 0x1112_1314_1516_1718_i64;
     let float_a = 3.25_f64;
     let float_b = -11.5_f64;
+    let mut array_vec_a = Vec::with_capacity(9);
+    array_vec_a.push(Value::Int(11));
+    array_vec_a.push(Value::Int(22));
+    let array_ptr_a = array_vec_a.as_ptr() as usize;
+    let array_len_a = array_vec_a.len();
+    let mut array_vec_b = Vec::with_capacity(13);
+    array_vec_b.push(Value::Int(1));
+    array_vec_b.push(Value::Int(2));
+    array_vec_b.push(Value::Int(3));
+    let array_ptr_b = array_vec_b.as_ptr() as usize;
+    let array_len_b = array_vec_b.len();
     let int_a_bytes = encode_value_bytes(Value::Int(int_a));
     let int_b_bytes = encode_value_bytes(Value::Int(int_b));
     let float_a_bytes = encode_value_bytes(Value::Float(float_a));
@@ -1413,17 +1835,21 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
     let bool_true_bytes = encode_value_bytes(Value::Bool(true));
     let string_a_bytes = encode_value_bytes(Value::String("a".to_string()));
     let string_b_bytes = encode_value_bytes(Value::String("b".to_string()));
+    let array_a_bytes = encode_value_bytes(Value::Array(array_vec_a));
+    let array_b_bytes = encode_value_bytes(Value::Array(array_vec_b));
     let stable_tag_pairs = [
         (&int_a_bytes[..], &int_b_bytes[..]),
         (&float_a_bytes[..], &float_b_bytes[..]),
         (&bool_false_bytes[..], &bool_true_bytes[..]),
         (&string_a_bytes[..], &string_b_bytes[..]),
+        (&array_a_bytes[..], &array_b_bytes[..]),
     ];
     let (tag_offset, tag_size) = detect_tag_layout(&stable_tag_pairs)?;
     let int_tag = decode_tag(&int_a_bytes, tag_offset, tag_size);
     let float_tag = decode_tag(&float_a_bytes, tag_offset, tag_size);
     let bool_tag = decode_tag(&bool_false_bytes, tag_offset, tag_size);
     let string_tag = decode_tag(&string_a_bytes, tag_offset, tag_size);
+    let array_tag = decode_tag(&array_a_bytes, tag_offset, tag_size);
 
     let payload_match_a = int_a.to_le_bytes();
     let payload_match_b = int_b.to_le_bytes();
@@ -1491,6 +1917,21 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
         ));
     }
 
+    let array_ptr_offset = detect_usize_field_offset(
+        &array_a_bytes,
+        &array_b_bytes,
+        array_ptr_a,
+        array_ptr_b,
+        "Value::Array ptr offset",
+    )?;
+    let array_len_offset = detect_usize_field_offset(
+        &array_a_bytes,
+        &array_b_bytes,
+        array_len_a,
+        array_len_b,
+        "Value::Array len offset",
+    )?;
+
     Ok(ValueLayout {
         size: usize_to_i32(value_size, "Value size")?,
         tag_offset: usize_to_i32(tag_offset, "Value tag offset")?,
@@ -1499,9 +1940,12 @@ fn detect_value_layout() -> VmResult<ValueLayout> {
         float_tag,
         bool_tag,
         string_tag,
+        array_tag,
         int_payload_offset: usize_to_i32(int_payload_offset, "Value::Int payload offset")?,
         float_payload_offset: usize_to_i32(float_payload_offset, "Value::Float payload offset")?,
         bool_payload_offset: usize_to_i32(bool_payload_offset, "Value::Bool payload offset")?,
+        array_ptr_offset: usize_to_i32(array_ptr_offset, "Value::Array ptr offset")?,
+        array_len_offset: usize_to_i32(array_len_offset, "Value::Array len offset")?,
     })
 }
 
@@ -1562,6 +2006,48 @@ fn decode_tag(bytes: &[u8], offset: usize, size: usize) -> u32 {
     out
 }
 
+fn detect_usize_field_offset(
+    value_a: &[u8],
+    value_b: &[u8],
+    needle_a: usize,
+    needle_b: usize,
+    label: &str,
+) -> VmResult<usize> {
+    let width = std::mem::size_of::<usize>();
+    if value_a.len() != value_b.len() || value_a.len() < width {
+        return Err(VmError::JitNative(format!(
+            "invalid probe sizes while detecting {label}"
+        )));
+    }
+
+    let mut found = None;
+    for offset in 0..=value_a.len() - width {
+        let a = decode_usize(value_a, offset);
+        let b = decode_usize(value_b, offset);
+        if a == needle_a && b == needle_b {
+            if found.is_some() {
+                return Err(VmError::JitNative(format!(
+                    "ambiguous {label} while probing native layout"
+                )));
+            }
+            found = Some(offset);
+        }
+    }
+    found.ok_or_else(|| VmError::JitNative(format!("failed to detect {label}")))
+}
+
+fn decode_usize(bytes: &[u8], offset: usize) -> usize {
+    if std::mem::size_of::<usize>() == 8 {
+        let mut data = [0u8; 8];
+        data.copy_from_slice(&bytes[offset..offset + 8]);
+        u64::from_le_bytes(data) as usize
+    } else {
+        let mut data = [0u8; 4];
+        data.copy_from_slice(&bytes[offset..offset + 4]);
+        u32::from_le_bytes(data) as usize
+    }
+}
+
 fn encode_value_bytes(value: Value) -> Vec<u8> {
     let size = std::mem::size_of::<Value>();
     let mut bytes = vec![0u8; size];
@@ -1609,6 +2095,570 @@ fn set_bridge_error(error: VmError) {
     JIT_BRIDGE_ERROR.with(|slot| {
         *slot.borrow_mut() = Some(error);
     });
+}
+
+extern "C" fn jit_native_pop_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace pop helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    match vm.pop_value() {
+        Ok(_) => STATUS_CONTINUE,
+        Err(err) => {
+            set_bridge_error(err);
+            STATUS_ERROR
+        }
+    }
+}
+
+extern "C" fn jit_native_dup_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace dup helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.peek_value() {
+        Ok(value) => value.clone(),
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    vm.stack.push(value);
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_ldc_bridge(vm_ptr: *mut Vm, const_index: u32) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace ldc helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.program.constants.get(const_index as usize) {
+        Some(value) => value.clone(),
+        None => {
+            set_bridge_error(VmError::InvalidConstant(const_index));
+            return STATUS_ERROR;
+        }
+    };
+    vm.stack.push(value);
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_ldloc_bridge(vm_ptr: *mut Vm, local_index: u32) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace ldloc helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let index = match u8::try_from(local_index) {
+        Ok(index) => index,
+        Err(_) => {
+            set_bridge_error(VmError::JitNative(
+                "native trace ldloc helper received out-of-range local index".to_string(),
+            ));
+            return STATUS_ERROR;
+        }
+    };
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.locals.get(index as usize) {
+        Some(value) => value.clone(),
+        None => {
+            set_bridge_error(VmError::InvalidLocal(index));
+            return STATUS_ERROR;
+        }
+    };
+    vm.stack.push(value);
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_stloc_bridge(vm_ptr: *mut Vm, local_index: u32) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace stloc helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let index = match u8::try_from(local_index) {
+        Ok(index) => index,
+        Err(_) => {
+            set_bridge_error(VmError::JitNative(
+                "native trace stloc helper received out-of-range local index".to_string(),
+            ));
+            return STATUS_ERROR;
+        }
+    };
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let Some(slot) = vm.locals.get_mut(index as usize) else {
+        set_bridge_error(VmError::InvalidLocal(index));
+        return STATUS_ERROR;
+    };
+    *slot = value;
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_len_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin len helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let len = match value {
+        Value::String(text) => text.chars().count() as i64,
+        Value::Array(values) => values.len() as i64,
+        Value::Map(entries) => entries.len() as i64,
+        _ => {
+            set_bridge_error(VmError::TypeMismatch("string/array/map"));
+            return STATUS_ERROR;
+        }
+    };
+    vm.stack.push(Value::Int(len));
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_slice_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin slice helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let len = match vm.pop_value() {
+        Ok(value) => match value.as_int() {
+            Ok(value) => value,
+            Err(err) => {
+                set_bridge_error(err);
+                return STATUS_ERROR;
+            }
+        },
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let start = match vm.pop_value() {
+        Ok(value) => match value.as_int() {
+            Ok(value) => value,
+            Err(err) => {
+                set_bridge_error(err);
+                return STATUS_ERROR;
+            }
+        },
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let source = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+
+    if start < 0 || len <= 0 {
+        match source {
+            Value::String(_) => vm.stack.push(Value::String(String::new())),
+            Value::Array(_) => vm.stack.push(Value::Array(Vec::new())),
+            _ => {
+                set_bridge_error(VmError::TypeMismatch("string/array"));
+                return STATUS_ERROR;
+            }
+        }
+        return STATUS_CONTINUE;
+    }
+
+    let start = match usize::try_from(start) {
+        Ok(value) => value,
+        Err(_) => {
+            set_bridge_error(VmError::HostError(
+                "slice start overflow while converting to usize".to_string(),
+            ));
+            return STATUS_ERROR;
+        }
+    };
+    let len = match usize::try_from(len) {
+        Ok(value) => value,
+        Err(_) => {
+            set_bridge_error(VmError::HostError(
+                "slice length overflow while converting to usize".to_string(),
+            ));
+            return STATUS_ERROR;
+        }
+    };
+
+    match source {
+        Value::String(text) => {
+            vm.stack
+                .push(Value::String(text.chars().skip(start).take(len).collect()));
+        }
+        Value::Array(values) => {
+            vm.stack.push(Value::Array(
+                values.into_iter().skip(start).take(len).collect(),
+            ));
+        }
+        _ => {
+            set_bridge_error(VmError::TypeMismatch("string/array"));
+            return STATUS_ERROR;
+        }
+    }
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_concat_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin concat helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let rhs = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let lhs = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+
+    match (lhs, rhs) {
+        (Value::String(lhs), Value::String(rhs)) => {
+            let mut out = String::with_capacity(lhs.len() + rhs.len());
+            out.push_str(&lhs);
+            out.push_str(&rhs);
+            vm.stack.push(Value::String(out));
+        }
+        (Value::Array(mut lhs), Value::Array(rhs)) => {
+            lhs.extend(rhs);
+            vm.stack.push(Value::Array(lhs));
+        }
+        _ => {
+            set_bridge_error(VmError::TypeMismatch("string/string or array/array"));
+            return STATUS_ERROR;
+        }
+    }
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_get_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin get helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let key = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let container = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+
+    match container {
+        Value::Array(values) => {
+            let index = match key.as_int() {
+                Ok(value) => value,
+                Err(err) => {
+                    set_bridge_error(err);
+                    return STATUS_ERROR;
+                }
+            };
+            if index < 0 {
+                set_bridge_error(VmError::HostError(
+                    "array index must be non-negative".to_string(),
+                ));
+                return STATUS_ERROR;
+            }
+            let index = match usize::try_from(index) {
+                Ok(value) => value,
+                Err(_) => {
+                    set_bridge_error(VmError::HostError("array index overflow".to_string()));
+                    return STATUS_ERROR;
+                }
+            };
+            let Some(value) = values.into_iter().nth(index) else {
+                set_bridge_error(VmError::HostError(format!(
+                    "array index {index} out of bounds"
+                )));
+                return STATUS_ERROR;
+            };
+            vm.stack.push(value);
+        }
+        Value::Map(entries) => {
+            for (existing_key, value) in entries {
+                if existing_key == key {
+                    vm.stack.push(value);
+                    return STATUS_CONTINUE;
+                }
+            }
+            set_bridge_error(VmError::HostError("map key not found".to_string()));
+            return STATUS_ERROR;
+        }
+        Value::String(text) => {
+            let index = match key.as_int() {
+                Ok(value) => value,
+                Err(err) => {
+                    set_bridge_error(err);
+                    return STATUS_ERROR;
+                }
+            };
+            if index < 0 {
+                set_bridge_error(VmError::HostError(
+                    "string index must be non-negative".to_string(),
+                ));
+                return STATUS_ERROR;
+            }
+            let index = match usize::try_from(index) {
+                Ok(value) => value,
+                Err(_) => {
+                    set_bridge_error(VmError::HostError("string index overflow".to_string()));
+                    return STATUS_ERROR;
+                }
+            };
+            let Some(value) = text
+                .chars()
+                .nth(index)
+                .map(|ch| Value::String(ch.to_string()))
+            else {
+                set_bridge_error(VmError::HostError(format!(
+                    "string index {index} out of bounds"
+                )));
+                return STATUS_ERROR;
+            };
+            vm.stack.push(value);
+        }
+        _ => {
+            set_bridge_error(VmError::TypeMismatch("array/map/string"));
+            return STATUS_ERROR;
+        }
+    }
+
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_set_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin set helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let key = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let container = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+
+    match container {
+        Value::Array(values) => {
+            let index = match key.as_int() {
+                Ok(value) => value,
+                Err(err) => {
+                    set_bridge_error(err);
+                    return STATUS_ERROR;
+                }
+            };
+            if index < 0 {
+                set_bridge_error(VmError::HostError(
+                    "array index must be non-negative".to_string(),
+                ));
+                return STATUS_ERROR;
+            }
+            let index = match usize::try_from(index) {
+                Ok(value) => value,
+                Err(_) => {
+                    set_bridge_error(VmError::HostError("array index overflow".to_string()));
+                    return STATUS_ERROR;
+                }
+            };
+            let mut out = values;
+            if index < out.len() {
+                out[index] = value;
+            } else if index == out.len() {
+                out.push(value);
+            } else {
+                set_bridge_error(VmError::HostError(format!(
+                    "array set index {index} out of bounds"
+                )));
+                return STATUS_ERROR;
+            }
+            vm.stack.push(Value::Array(out));
+        }
+        Value::Map(mut entries) => {
+            if let Some((_, existing_value)) = entries
+                .iter_mut()
+                .find(|(existing_key, _)| *existing_key == key)
+            {
+                *existing_value = value;
+            } else {
+                entries.push((key, value));
+            }
+            vm.stack.push(Value::Map(entries));
+        }
+        _ => {
+            set_bridge_error(VmError::TypeMismatch("array/map"));
+            return STATUS_ERROR;
+        }
+    }
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_array_new_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin array_new helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    vm.stack.push(Value::Array(Vec::new()));
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_array_push_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin array_push helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let value = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let array = match vm.pop_value() {
+        Ok(value) => value,
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    let Value::Array(mut values) = array else {
+        set_bridge_error(VmError::TypeMismatch("array"));
+        return STATUS_ERROR;
+    };
+    values.push(value);
+    vm.stack.push(Value::Array(values));
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_map_new_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin map_new helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    vm.stack.push(Value::Map(Vec::new()));
+    STATUS_CONTINUE
+}
+
+extern "C" fn jit_native_builtin_assert_bridge(vm_ptr: *mut Vm) -> i32 {
+    if vm_ptr.is_null() {
+        set_bridge_error(VmError::JitNative(
+            "native trace builtin assert helper received null vm pointer".to_string(),
+        ));
+        return STATUS_ERROR;
+    }
+
+    let vm = unsafe { &mut *vm_ptr };
+    let condition = match vm.pop_value() {
+        Ok(value) => match value.as_bool() {
+            Ok(value) => value,
+            Err(err) => {
+                set_bridge_error(err);
+                return STATUS_ERROR;
+            }
+        },
+        Err(err) => {
+            set_bridge_error(err);
+            return STATUS_ERROR;
+        }
+    };
+    if !condition {
+        set_bridge_error(VmError::HostError("assertion failed".to_string()));
+        return STATUS_ERROR;
+    }
+    STATUS_CONTINUE
 }
 
 extern "C" fn jit_native_call_bridge(vm_ptr: *mut Vm, index: u16, argc: u8, call_ip: u64) -> i32 {
@@ -1802,6 +2852,7 @@ fn free_executable_region(_ptr: *mut u8, _len: usize) -> VmResult<()> {
 mod tests {
     use super::super::{STATUS_CONTINUE, STATUS_YIELDED};
     use super::*;
+    use crate::builtins::BuiltinFunction;
     use crate::jit::{JitTrace, JitTraceTerminal, TraceStep};
     use crate::vm::Program;
     use crate::vm::{CallOutcome, HostFunction};
@@ -1814,6 +2865,7 @@ mod tests {
             root_ip: 0,
             start_line: None,
             has_call: false,
+            has_yielding_call: false,
             steps: vec![step],
             terminal: JitTraceTerminal::LoopBack,
             executions: 0,
@@ -1904,13 +2956,9 @@ mod tests {
     #[test]
     fn non_arithmetic_steps_emit_without_helper_calls() {
         let steps = [
-            TraceStep::Ldc(0),
             TraceStep::Ceq,
-            TraceStep::Pop,
-            TraceStep::Dup,
-            TraceStep::Ldloc(0),
-            TraceStep::Stloc(0),
             TraceStep::GuardFalse { exit_ip: 0 },
+            TraceStep::JumpToIp { target_ip: 0 },
             TraceStep::JumpToRoot,
             TraceStep::Ret,
         ];
@@ -1925,6 +2973,31 @@ mod tests {
                 call_count, 0,
                 "step {:?} should emit no helper calls, code bytes: {:02X?}",
                 step, code
+            );
+        }
+    }
+
+    #[test]
+    fn clone_drop_steps_emit_helper_calls() {
+        let steps = [
+            TraceStep::Ldc(0),
+            TraceStep::Pop,
+            TraceStep::Dup,
+            TraceStep::Ldloc(0),
+            TraceStep::Stloc(0),
+        ];
+        for step in steps {
+            let trace = build_single_step_trace(step.clone());
+            let code = emit_native_trace_bytes(&trace).expect("native trace should compile");
+            let call_count = code
+                .windows(2)
+                .filter(|window| *window == [0xFF, 0xD0])
+                .count();
+            assert!(
+                call_count >= 1,
+                "step {:?} should emit at least one helper call, code bytes: {:02X?}",
+                step,
+                code
             );
         }
     }
@@ -1972,6 +3045,163 @@ mod tests {
     }
 
     #[test]
+    fn call_step_bridge_executes_builtin_len() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::Array(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ]));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::Len.call_index(),
+                argc: 1,
+                call_ip: 0,
+            },
+        )
+        .expect("native len call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::Int(3)]);
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
+    fn call_step_bridge_executes_builtin_concat() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::String("ab".to_string()));
+        vm.stack.push(Value::String("cd".to_string()));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::Concat.call_index(),
+                argc: 2,
+                call_ip: 0,
+            },
+        )
+        .expect("native concat call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::String("abcd".to_string())]);
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
+    fn call_step_bridge_executes_builtin_slice() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::String("abcdef".to_string()));
+        vm.stack.push(Value::Int(2));
+        vm.stack.push(Value::Int(3));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::Slice.call_index(),
+                argc: 3,
+                call_ip: 0,
+            },
+        )
+        .expect("native slice call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::String("cde".to_string())]);
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
+    fn call_step_bridge_executes_builtin_array_new_and_push() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+
+        let new_status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::ArrayNew.call_index(),
+                argc: 0,
+                call_ip: 0,
+            },
+        )
+        .expect("native array_new call should run");
+        assert_eq!(new_status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::Array(Vec::new())]);
+        assert!(take_bridge_error().is_none());
+
+        vm.stack.push(Value::Int(7));
+        let push_status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::ArrayPush.call_index(),
+                argc: 2,
+                call_ip: 0,
+            },
+        )
+        .expect("native array_push call should run");
+        assert_eq!(push_status, STATUS_CONTINUE);
+        assert_eq!(vm.stack(), &[Value::Array(vec![Value::Int(7)])]);
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
+    fn call_step_bridge_executes_builtin_set_replace() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::Array(vec![
+            Value::Int(1),
+            Value::Int(2),
+            Value::Int(3),
+        ]));
+        vm.stack.push(Value::Int(1));
+        vm.stack.push(Value::Int(9));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::Set.call_index(),
+                argc: 3,
+                call_ip: 0,
+            },
+        )
+        .expect("native set call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(
+            vm.stack(),
+            &[Value::Array(vec![
+                Value::Int(1),
+                Value::Int(9),
+                Value::Int(3)
+            ])]
+        );
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
+    fn call_step_bridge_executes_builtin_set_append() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack
+            .push(Value::Array(vec![Value::Int(1), Value::Int(2)]));
+        vm.stack.push(Value::Int(2));
+        vm.stack.push(Value::Int(7));
+
+        let status = execute_single_step(
+            &mut vm,
+            TraceStep::Call {
+                index: BuiltinFunction::Set.call_index(),
+                argc: 3,
+                call_ip: 0,
+            },
+        )
+        .expect("native set call should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(
+            vm.stack(),
+            &[Value::Array(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(7)
+            ])]
+        );
+        assert!(take_bridge_error().is_none());
+    }
+
+    #[test]
     fn call_step_bridge_propagates_yield_status() {
         let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
         vm.register_function(Box::new(YieldOnceHost { yielded: false }));
@@ -1992,6 +3222,43 @@ mod tests {
         assert!(
             take_bridge_error().is_none(),
             "yielding call bridge should not set bridge error"
+        );
+    }
+
+    #[test]
+    fn dup_step_bridge_clones_owned_values() {
+        let mut vm = Vm::new(Program::new(Vec::new(), Vec::new()));
+        vm.stack.push(Value::String("hello".to_string()));
+
+        let status = execute_single_step(&mut vm, TraceStep::Dup).expect("native dup should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(
+            vm.stack(),
+            &[
+                Value::String("hello".to_string()),
+                Value::String("hello".to_string())
+            ]
+        );
+        assert!(
+            take_bridge_error().is_none(),
+            "successful dup bridge should not set bridge error"
+        );
+    }
+
+    #[test]
+    fn stloc_step_bridge_moves_owned_values_safely() {
+        let mut vm = Vm::with_locals(Program::new(Vec::new(), Vec::new()), 1);
+        vm.locals[0] = Value::String("old".to_string());
+        vm.stack.push(Value::String("new".to_string()));
+
+        let status =
+            execute_single_step(&mut vm, TraceStep::Stloc(0)).expect("native stloc should run");
+        assert_eq!(status, STATUS_CONTINUE);
+        assert_eq!(vm.locals(), &[Value::String("new".to_string())]);
+        assert!(vm.stack().is_empty());
+        assert!(
+            take_bridge_error().is_none(),
+            "successful stloc bridge should not set bridge error"
         );
     }
 

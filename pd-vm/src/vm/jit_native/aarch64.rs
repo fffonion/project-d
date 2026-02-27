@@ -2056,6 +2056,7 @@ mod tests {
             root_ip: 0,
             start_line: None,
             has_call: false,
+            has_yielding_call: false,
             steps: vec![step],
             terminal: JitTraceTerminal::LoopBack,
             executions: 0,
@@ -2261,6 +2262,7 @@ mod tests {
             root_ip: 0,
             start_line: None,
             has_call: true,
+            has_yielding_call: true,
             steps: vec![
                 TraceStep::Nop,
                 TraceStep::Ldc(0),
@@ -2302,6 +2304,7 @@ mod tests {
             root_ip: 0,
             start_line: None,
             has_call: false,
+            has_yielding_call: false,
             steps: vec![
                 TraceStep::Ldc(0),
                 TraceStep::GuardFalse { exit_ip: 7 },
@@ -2324,6 +2327,7 @@ mod tests {
             root_ip: 0,
             start_line: None,
             has_call: false,
+            has_yielding_call: false,
             steps: vec![
                 TraceStep::Ldloc(0),
                 TraceStep::Ldc(0),

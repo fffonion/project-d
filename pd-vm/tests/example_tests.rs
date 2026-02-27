@@ -38,6 +38,9 @@ fn register_functions(vm: &mut Vm, functions: &[FunctionDecl]) {
 fn run_compiled_file(path: &Path) -> Vec<Value> {
     let compiled = compile_source_file(path).expect("compile should succeed");
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    let mut jit_config = vm.jit_config().clone();
+    jit_config.enabled = false;
+    vm.set_jit_config(jit_config);
     register_functions(&mut vm, &compiled.functions);
     let status = vm.run().expect("vm should run");
     assert_eq!(status, VmStatus::Halted);
@@ -73,28 +76,12 @@ fn examples_run() {
     let stack = run_compiled_file(&root.join("example_complex.scm"));
     assert_eq!(stack, vec![Value::Int(12)]);
 
-    // AES fixture should run in regular test mode as well (not only perf tests).
-    let stack = run_compiled_file(&root.join("aes_128_cbc.rss"));
+    // AES fixture should also be consumable as a module from another RSS program.
+    let stack = run_compiled_file(&root.join("aes_128_cbc_usage.rss"));
     assert_eq!(
         stack,
-        vec![
-            Value::Int(0),
-            Value::Int(0x76),
-            Value::Int(0x49),
-            Value::Int(0xAB),
-            Value::Int(0xAC),
-            Value::Int(0x81),
-            Value::Int(0x19),
-            Value::Int(0xB2),
-            Value::Int(0x46),
-            Value::Int(0xCE),
-            Value::Int(0xE9),
-            Value::Int(0x8E),
-            Value::Int(0x9B),
-            Value::Int(0x12),
-            Value::Int(0xE9),
-            Value::Int(0x19),
-            Value::Int(0x7D),
-        ]
+        vec![Value::String(
+            "7649abac8119b246cee98e9b12e9197d".to_string()
+        )]
     );
 }

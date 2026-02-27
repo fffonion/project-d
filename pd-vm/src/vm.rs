@@ -508,7 +508,7 @@ struct NativeTrace {
     code: Arc<[u8]>,
     root_ip: usize,
     terminal: crate::jit::JitTraceTerminal,
-    has_call: bool,
+    has_yielding_call: bool,
 }
 
 #[cfg(any(
@@ -1048,6 +1048,11 @@ impl Vm {
                         return Ok(TraceExecOutcome::Continue);
                     }
                 }
+                crate::jit::TraceStep::JumpToIp { target_ip } => {
+                    self.jump_to(*target_ip)?;
+                    self.jit.mark_trace_executed(trace_id);
+                    return Ok(TraceExecOutcome::Continue);
+                }
                 crate::jit::TraceStep::JumpToRoot => {
                     self.jump_to(trace.root_ip)?;
                     self.jit.mark_trace_executed(trace_id);
@@ -1095,7 +1100,7 @@ impl Vm {
     ))]
     fn execute_jit_native(&mut self, trace_id: usize) -> VmResult<TraceExecOutcome> {
         self.ensure_native_trace(trace_id)?;
-        let (entry, root_ip, terminal, has_call) = {
+        let (entry, root_ip, terminal, has_yielding_call) = {
             let native = self.native_traces.get(&trace_id).ok_or_else(|| {
                 VmError::JitNative(format!("native trace entry for id {} missing", trace_id))
             })?;
@@ -1103,7 +1108,7 @@ impl Vm {
                 native.entry,
                 native.root_ip,
                 native.terminal.clone(),
-                native.has_call,
+                native.has_yielding_call,
             )
         };
 
@@ -1118,7 +1123,7 @@ impl Vm {
                 jit_native::STATUS_TRACE_EXIT => {
                     // Fast path: if this trace looped back to its own root and cannot yield via host
                     // calls, keep executing in native mode without bouncing through the interpreter.
-                    if !has_call
+                    if !has_yielding_call
                         && terminal == crate::jit::JitTraceTerminal::LoopBack
                         && self.ip == root_ip
                     {
@@ -1198,7 +1203,7 @@ impl Vm {
                 code,
                 root_ip: trace.root_ip,
                 terminal: trace.terminal,
-                has_call: trace.has_call,
+                has_yielding_call: trace.has_yielding_call,
             },
         );
         Ok(())

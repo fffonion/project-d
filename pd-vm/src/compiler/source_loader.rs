@@ -1406,7 +1406,8 @@ fn rewrite_function_call_paths(
                         if call_check < bytes.len()
                             && bytes[call_check] == b'('
                             && (namespace_wildcard
-                                || namespace_methods.is_some_and(|methods| methods.contains(member)))
+                                || namespace_methods
+                                    .is_some_and(|methods| methods.contains(member)))
                         {
                             out.push_str(member);
                             i = k;

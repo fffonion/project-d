@@ -1,4 +1,7 @@
-use vm::{CallOutcome, HostFunction, JitConfig, OpCode, Value, Vm, VmStatus, compile_source};
+use vm::{
+    CallOutcome, HostFunction, JitConfig, JitTraceTerminal, OpCode, Value, Vm, VmStatus,
+    compile_source,
+};
 
 fn native_jit_supported() -> bool {
     (cfg!(target_arch = "x86_64")
@@ -144,6 +147,69 @@ fn trace_jit_supports_host_calls_with_native_mixed_mode() {
         assert!(
             vm.jit_native_exec_count() > 0,
             "expected native call trace to execute at least once"
+        );
+    }
+}
+
+#[test]
+fn trace_jit_nested_loops_use_branch_exit_segments() {
+    let source = r#"
+        fn print(x);
+        let i = 0;
+        let sum = 0;
+        while i < 3 {
+            let j = 0;
+            while j < 4 {
+                print(j);
+                sum = sum + j;
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        sum;
+    "#;
+
+    let compiled = compile_source(source).expect("compile should succeed");
+    let mut vm = Vm::with_locals(compiled.program, compiled.locals);
+    vm.set_jit_config(JitConfig {
+        enabled: native_jit_supported(),
+        hot_loop_threshold: 1,
+        max_trace_len: 512,
+    });
+    for func in &compiled.functions {
+        match func.name.as_str() {
+            "print" => vm.register_function(Box::new(PrintNoReturn)),
+            _ => panic!("unexpected function {}", func.name),
+        };
+    }
+
+    let status = vm.run().expect("vm should run");
+    assert_eq!(status, VmStatus::Halted);
+    assert_eq!(vm.stack(), &[Value::Int(18)]);
+
+    if native_jit_supported() {
+        let dump = vm.dump_jit_info();
+        let snapshot = vm.jit_snapshot();
+        assert!(
+            snapshot
+                .attempts
+                .iter()
+                .any(|attempt| attempt.result.is_ok()),
+            "expected successful trace compiles for nested loops, dump:\n{dump}"
+        );
+        assert!(
+            snapshot
+                .traces
+                .iter()
+                .any(|trace| trace.terminal == JitTraceTerminal::BranchExit),
+            "expected at least one branch-exit trace for nested loop handoff, dump:\n{dump}"
+        );
+        assert!(
+            snapshot
+                .traces
+                .iter()
+                .any(|trace| trace.terminal == JitTraceTerminal::LoopBack),
+            "expected at least one loop-back trace, dump:\n{dump}"
         );
     }
 }

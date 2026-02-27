@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::builtins::BuiltinFunction;
 
 use super::{
-    ClosureExpr, Expr, FunctionDecl, FunctionImpl, ParseError, STDLIB_PRINT_ARITY,
+    ClosureExpr, Expr, FunctionDecl, FunctionImpl, MatchPattern, ParseError, STDLIB_PRINT_ARITY,
     STDLIB_PRINT_NAME, Stmt,
 };
 
@@ -22,6 +22,7 @@ enum TokenKind {
     For,
     If,
     Else,
+    Match,
     While,
     Break,
     Continue,
@@ -44,6 +45,7 @@ enum TokenKind {
     Semicolon,
     Equal,
     EqualEqual,
+    FatArrow,
     Less,
     Greater,
     Eof,
@@ -165,6 +167,9 @@ impl<'a> Lexer<'a> {
                 if self.current == Some('=') {
                     self.advance();
                     TokenKind::EqualEqual
+                } else if self.current == Some('>') {
+                    self.advance();
+                    TokenKind::FatArrow
                 } else {
                     TokenKind::Equal
                 }
@@ -188,6 +193,7 @@ impl<'a> Lexer<'a> {
                     "for" => TokenKind::For,
                     "if" => TokenKind::If,
                     "else" => TokenKind::Else,
+                    "match" => TokenKind::Match,
                     "while" => TokenKind::While,
                     "break" => TokenKind::Break,
                     "continue" => TokenKind::Continue,
@@ -983,6 +989,9 @@ impl Parser {
     }
 
     fn parse_primary(&mut self) -> Result<Expr, ParseError> {
+        if self.match_kind(&TokenKind::Match) {
+            return self.parse_match_expr();
+        }
         if self.match_kind(&TokenKind::True) {
             return Ok(Expr::Bool(true));
         }
@@ -1096,6 +1105,98 @@ impl Parser {
         Err(ParseError {
             line: self.current_line(),
             message: "expected expression".to_string(),
+        })
+    }
+
+    fn parse_match_expr(&mut self) -> Result<Expr, ParseError> {
+        let value = self.parse_expr()?;
+        self.expect(&TokenKind::LBrace, "expected '{' after match value")?;
+
+        let value_slot = self.allocate_hidden_local()?;
+        let result_slot = self.allocate_hidden_local()?;
+        let mut arms = Vec::<(MatchPattern, Expr)>::new();
+        let mut default: Option<Expr> = None;
+
+        while !self.check(&TokenKind::RBrace) {
+            if self.check(&TokenKind::Eof) {
+                return Err(ParseError {
+                    line: self.current_line(),
+                    message: "unexpected end of input in match expression".to_string(),
+                });
+            }
+
+            let pattern_token_line = self.current_line();
+            let pattern = self.parse_match_pattern()?;
+            self.expect(&TokenKind::FatArrow, "expected '=>' in match arm")?;
+            let arm_expr = self.parse_expr()?;
+
+            match pattern {
+                Some(pattern) => {
+                    if default.is_some() {
+                        return Err(ParseError {
+                            line: pattern_token_line,
+                            message: "non-wildcard match arm cannot appear after '_' arm"
+                                .to_string(),
+                        });
+                    }
+                    arms.push((pattern, arm_expr));
+                }
+                None => {
+                    if default.is_some() {
+                        return Err(ParseError {
+                            line: pattern_token_line,
+                            message: "duplicate '_' match arm".to_string(),
+                        });
+                    }
+                    default = Some(arm_expr);
+                }
+            }
+
+            if self.match_kind(&TokenKind::Comma) {
+                if self.check(&TokenKind::RBrace) {
+                    break;
+                }
+                continue;
+            }
+            if !self.check(&TokenKind::RBrace) {
+                return Err(ParseError {
+                    line: self.current_line(),
+                    message: "expected ',' or '}' after match arm".to_string(),
+                });
+            }
+        }
+        self.expect(&TokenKind::RBrace, "expected '}' after match expression")?;
+
+        let default = default.ok_or_else(|| ParseError {
+            line: self.current_line(),
+            message: "match expression requires a wildcard arm '_ => ...'".to_string(),
+        })?;
+
+        Ok(Expr::Match {
+            value_slot,
+            result_slot,
+            value: Box::new(value),
+            arms,
+            default: Box::new(default),
+        })
+    }
+
+    fn parse_match_pattern(&mut self) -> Result<Option<MatchPattern>, ParseError> {
+        if let Some(value) = self.match_int() {
+            return Ok(Some(MatchPattern::Int(value)));
+        }
+        if let Some(value) = self.match_string() {
+            return Ok(Some(MatchPattern::String(value)));
+        }
+        if let Some(name) = self.match_ident()
+            && name == "_"
+        {
+            return Ok(None);
+        }
+        Err(ParseError {
+            line: self.current_line(),
+            message: "match patterns currently support only int/string literals and '_'"
+                .to_string(),
         })
     }
 

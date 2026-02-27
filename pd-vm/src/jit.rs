@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::builtins::BuiltinFunction;
 use crate::debug::DebugInfo;
 use crate::vm::{OpCode, Program};
 
@@ -30,6 +31,7 @@ fn native_jit_supported() -> bool {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum JitTraceTerminal {
     LoopBack,
+    BranchExit,
     Halt,
 }
 
@@ -38,7 +40,6 @@ pub enum JitNyiReason {
     UnsupportedArch,
     HotLoopThresholdZero,
     UnsupportedOpcode(u8),
-    JumpToNonRoot { target: usize },
     BackwardGuard { target: usize },
     InvalidJumpTarget { target: usize },
     InvalidImmediate(&'static str),
@@ -54,9 +55,6 @@ impl JitNyiReason {
             }
             JitNyiReason::HotLoopThresholdZero => "hot_loop_threshold must be > 0".to_string(),
             JitNyiReason::UnsupportedOpcode(op) => format!("unsupported opcode 0x{op:02X}"),
-            JitNyiReason::JumpToNonRoot { target } => {
-                format!("opcode br to non-root target {target} is NYI")
-            }
             JitNyiReason::BackwardGuard { target } => {
                 format!("opcode brfalse with backward target {target} is NYI")
             }
@@ -102,6 +100,9 @@ pub enum TraceStep {
     GuardFalse {
         exit_ip: usize,
     },
+    JumpToIp {
+        target_ip: usize,
+    },
     JumpToRoot,
     Ret,
 }
@@ -112,6 +113,7 @@ pub struct JitTrace {
     pub root_ip: usize,
     pub start_line: Option<u32>,
     pub has_call: bool,
+    pub has_yielding_call: bool,
     pub steps: Vec<TraceStep>,
     pub terminal: JitTraceTerminal,
     pub executions: u64,
@@ -337,7 +339,6 @@ impl TraceJitEngine {
         let mut steps = Vec::new();
 
         while steps.len() < self.config.max_trace_len {
-            let instr_ip = ip;
             let opcode = *code
                 .get(ip)
                 .ok_or(JitNyiReason::InvalidJumpTarget { target: ip })?;
@@ -433,6 +434,9 @@ impl TraceJitEngine {
                 let target_u32 =
                     read_u32(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("br"))?;
                 let target = target_u32 as usize;
+                if target >= code.len() {
+                    return Err(JitNyiReason::InvalidJumpTarget { target });
+                }
                 if target == root_ip {
                     steps.push(TraceStep::JumpToRoot);
                     return Ok(self.finish_trace(
@@ -442,16 +446,29 @@ impl TraceJitEngine {
                         JitTraceTerminal::LoopBack,
                     ));
                 }
-                return Err(JitNyiReason::JumpToNonRoot { target });
+                if target < ip {
+                    steps.push(TraceStep::JumpToIp { target_ip: target });
+                    return Ok(self.finish_trace(
+                        program,
+                        root_ip,
+                        steps,
+                        JitTraceTerminal::BranchExit,
+                    ));
+                }
+                // Follow forward unconditional branches to avoid creating tiny branch-exit traces.
+                ip = target;
+                continue;
             }
             if opcode == OpCode::Call as u8 {
+                let call_ip = ip.saturating_sub(1);
                 let index =
-                    read_u16(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call"))?;
-                let argc = read_u8(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call"))?;
+                    read_u16(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call index"))?;
+                let argc =
+                    read_u8(code, &mut ip).ok_or(JitNyiReason::InvalidImmediate("call argc"))?;
                 steps.push(TraceStep::Call {
                     index,
                     argc,
-                    call_ip: instr_ip,
+                    call_ip,
                 });
                 continue;
             }
@@ -479,11 +496,19 @@ impl TraceJitEngine {
         let has_call = steps
             .iter()
             .any(|step| matches!(step, TraceStep::Call { .. }));
+        let has_yielding_call = steps.iter().any(|step| {
+            if let TraceStep::Call { index, .. } = step {
+                BuiltinFunction::from_call_index(*index).is_none()
+            } else {
+                false
+            }
+        });
         self.traces.push(JitTrace {
             id,
             root_ip,
             start_line,
             has_call,
+            has_yielding_call,
             steps,
             terminal,
             executions: 0,
@@ -536,6 +561,7 @@ fn trace_step_name(step: &TraceStep) -> &'static str {
         TraceStep::Stloc(_) => "stloc",
         TraceStep::Call { .. } => "call",
         TraceStep::GuardFalse { .. } => "guard_false",
+        TraceStep::JumpToIp { .. } => "jump_ip",
         TraceStep::JumpToRoot => "jump_root",
         TraceStep::Ret => "ret",
     }
@@ -596,10 +622,6 @@ fn read_u16(code: &[u8], ip: &mut usize) -> Option<u16> {
 
 fn nyi_reference() -> Vec<JitNyiDoc> {
     vec![
-        JitNyiDoc {
-            item: "br (to non-root target)",
-            reason: "only loop-back jumps to trace root are supported",
-        },
         JitNyiDoc {
             item: "brfalse (backward target)",
             reason: "only forward guard exits are supported",

@@ -309,6 +309,21 @@ fn remap_expr_indices(
         Expr::Var(index) => {
             *index = remap_local_index(*index, local_base)?;
         }
+        Expr::Match {
+            value_slot,
+            result_slot,
+            value,
+            arms,
+            default,
+        } => {
+            *value_slot = remap_local_index(*value_slot, local_base)?;
+            *result_slot = remap_local_index(*result_slot, local_base)?;
+            remap_expr_indices(value, local_base, function_map)?;
+            for (_, arm_expr) in arms {
+                remap_expr_indices(arm_expr, local_base, function_map)?;
+            }
+            remap_expr_indices(default, local_base, function_map)?;
+        }
     }
     Ok(())
 }
