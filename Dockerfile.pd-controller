@@ -1,0 +1,27 @@
+# syntax=docker/dockerfile:1.7
+
+FROM oven/bun:1 AS webui-builder
+WORKDIR /src/pd-controller/webui
+
+COPY pd-controller/webui/package.json pd-controller/webui/bun.lock ./
+RUN bun install --frozen-lockfile
+
+COPY pd-controller/webui/ ./
+RUN bun run build
+
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+COPY . .
+COPY --from=webui-builder /src/pd-controller/webui/dist ./pd-controller/webui/dist
+RUN cargo build -p pd-controller --release --locked
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/pd-controller /usr/local/bin/pd-controller
+
+EXPOSE 9100
+ENTRYPOINT ["/usr/local/bin/pd-controller"]

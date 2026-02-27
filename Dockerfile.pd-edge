@@ -1,0 +1,17 @@
+# syntax=docker/dockerfile:1.7
+
+FROM rust:1-bookworm AS builder
+WORKDIR /src
+
+COPY . .
+RUN cargo build -p pd-edge --release --locked
+
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /src/target/release/pd-edge /usr/local/bin/pd-edge
+
+EXPOSE 8080 8081
+ENTRYPOINT ["/usr/local/bin/pd-edge"]

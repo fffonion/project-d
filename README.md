@@ -21,6 +21,20 @@ cargo build --workspace
 cargo test --workspace
 ```
 
+## Published Docker images
+
+On tagged releases, GitHub Actions publishes:
+
+- `fffonion/pd-edge:<tag>` and `fffonion/pd-edge:latest`
+- `fffonion/pd-controller:<tag>` and `fffonion/pd-controller:latest`
+
+Example:
+
+```powershell
+docker pull fffonion/pd-edge:latest
+docker pull fffonion/pd-controller:latest
+```
+
 ## Local end-to-end quick start
 
 1. Build Web UI assets (embedded into `pd-controller` binary):
@@ -48,6 +62,35 @@ cargo run -p pd-edge -- --control-plane-url "http://127.0.0.1:9100" --edge-name 
 
 ```text
 http://127.0.0.1:9100/ui
+```
+
+## Standalone edge quick start (no controller)
+
+1. Start `pd-edge` without `--control-plane-url`:
+
+```powershell
+cargo run -p pd-edge
+```
+
+2. Compile a program to VMBC bytecode with `pd-vm-run`:
+
+```powershell
+New-Item -ItemType Directory -Force out | Out-Null
+cargo run -p pd-vm --bin pd-vm-run -- --emit-vmbc out/sample_proxy_program.vmbc pd-edge/examples/sample_proxy_program.rss
+```
+
+3. Upload bytecode to `pd-edge` local admin API:
+
+```powershell
+curl -X PUT "http://127.0.0.1:8081/program" `
+  -H "content-type: application/octet-stream" `
+  --data-binary "@out/sample_proxy_program.vmbc"
+```
+
+4. Send a data-plane request:
+
+```powershell
+curl -i "http://127.0.0.1:8080/anything" -H "x-client-id: demo-client"
 ```
 
 ## Key runtime behavior
