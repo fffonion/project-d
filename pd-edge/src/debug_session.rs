@@ -85,7 +85,10 @@ impl std::fmt::Display for DebugSessionError {
                 write!(f, "debugger is not attached to a matching request yet")
             }
             DebugSessionError::RemoteCommandsUnavailable => {
-                write!(f, "remote debug commands are unavailable for tcp debugger sessions")
+                write!(
+                    f,
+                    "remote debug commands are unavailable for tcp debugger sessions"
+                )
             }
             DebugSessionError::CommandTimeout => {
                 write!(f, "timed out waiting for debugger command response")
