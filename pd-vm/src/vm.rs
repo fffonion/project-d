@@ -128,7 +128,7 @@ pub struct Program {
     pub constants: Vec<Value>,
     pub code: Vec<u8>,
     pub imports: Vec<HostImport>,
-    pub debug: Option<crate::debug::DebugInfo>,
+    pub debug: Option<crate::debug_info::DebugInfo>,
 }
 
 impl Program {
@@ -144,7 +144,7 @@ impl Program {
     pub fn with_debug(
         constants: Vec<Value>,
         code: Vec<u8>,
-        debug: Option<crate::debug::DebugInfo>,
+        debug: Option<crate::debug_info::DebugInfo>,
     ) -> Self {
         Self {
             constants,
@@ -158,7 +158,7 @@ impl Program {
         constants: Vec<Value>,
         code: Vec<u8>,
         imports: Vec<HostImport>,
-        debug: Option<crate::debug::DebugInfo>,
+        debug: Option<crate::debug_info::DebugInfo>,
     ) -> Self {
         Self {
             constants,
@@ -247,7 +247,7 @@ impl OpCode {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum VmStatus {
     Halted,
     Yielded,
@@ -798,8 +798,18 @@ impl Vm {
                 if let Some(trace_id) = trace_id {
                     match self.execute_jit_entry(trace_id)? {
                         TraceExecOutcome::Continue => continue,
-                        TraceExecOutcome::Halted => return Ok(VmStatus::Halted),
-                        TraceExecOutcome::Yielded => return Ok(VmStatus::Yielded),
+                        TraceExecOutcome::Halted => {
+                            if let Some(active_debugger) = debugger.as_deref_mut() {
+                                active_debugger.on_vm_status(self, VmStatus::Halted);
+                            }
+                            return Ok(VmStatus::Halted);
+                        }
+                        TraceExecOutcome::Yielded => {
+                            if let Some(active_debugger) = debugger.as_deref_mut() {
+                                active_debugger.on_vm_status(self, VmStatus::Yielded);
+                            }
+                            return Ok(VmStatus::Yielded);
+                        }
                     }
                 }
             }
@@ -811,8 +821,18 @@ impl Vm {
             let opcode = self.read_u8()?;
             match self.execute_interpreter_instruction(opcode)? {
                 StepExecOutcome::Continue => {}
-                StepExecOutcome::Halted => return Ok(VmStatus::Halted),
-                StepExecOutcome::Yielded => return Ok(VmStatus::Yielded),
+                StepExecOutcome::Halted => {
+                    if let Some(active_debugger) = debugger.as_deref_mut() {
+                        active_debugger.on_vm_status(self, VmStatus::Halted);
+                    }
+                    return Ok(VmStatus::Halted);
+                }
+                StepExecOutcome::Yielded => {
+                    if let Some(active_debugger) = debugger.as_deref_mut() {
+                        active_debugger.on_vm_status(self, VmStatus::Yielded);
+                    }
+                    return Ok(VmStatus::Yielded);
+                }
             }
         }
     }
@@ -1229,7 +1249,7 @@ impl Vm {
         self.ip
     }
 
-    pub fn debug_info(&self) -> Option<&crate::debug::DebugInfo> {
+    pub fn debug_info(&self) -> Option<&crate::debug_info::DebugInfo> {
         self.program.debug.as_ref()
     }
 

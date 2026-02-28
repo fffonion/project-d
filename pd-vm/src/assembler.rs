@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use crate::debug::DebugInfoBuilder;
+use crate::debug_info::DebugInfoBuilder;
 use crate::vm::{OpCode, Program, Value};
 
 pub struct BytecodeBuilder {

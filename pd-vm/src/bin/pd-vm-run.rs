@@ -6,7 +6,8 @@ use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use vm::{
     CallOutcome, Debugger, DisassembleOptions, FunctionDecl, HostFunction, Value, Vm, VmError,
-    VmStatus, compile_source, compile_source_file, disassemble_vmbc_with_options, encode_program,
+    VmRecording, VmStatus, compile_source, compile_source_file, disassemble_vmbc_with_options,
+    encode_program, replay_recording_stdio,
 };
 
 const DEFAULT_SOURCE: &str = "examples/example.rss";
@@ -16,6 +17,8 @@ struct CliConfig {
     source: Option<String>,
     emit_vmbc_path: Option<String>,
     disasm_vmbc_path: Option<String>,
+    record_path: Option<String>,
+    view_recording_path: Option<String>,
     show_source: bool,
     repl: bool,
     debug: bool,
@@ -32,6 +35,8 @@ impl Default for CliConfig {
             source: None,
             emit_vmbc_path: None,
             disasm_vmbc_path: None,
+            record_path: None,
+            view_recording_path: None,
             show_source: false,
             repl: false,
             debug: false,
@@ -65,6 +70,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         print!("{listing}");
         return Ok(());
     }
+    if let Some(recording_path) = cli.view_recording_path.as_ref() {
+        let recording = VmRecording::load_from_file(recording_path)?;
+        replay_recording_stdio(&recording);
+        return Ok(());
+    }
 
     let source_path = resolve_source_path(cli.source.as_deref())?;
     let compiled = compile_source_file(&source_path)?;
@@ -74,6 +84,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("wrote {} bytes to {}", encoded.len(), output_path);
         return Ok(());
     }
+    let recording_program = cli.record_path.as_ref().map(|_| compiled.program.clone());
     let mut vm = Vm::with_locals(compiled.program, compiled.locals);
     if let Some(hot_loop) = cli.jit_hot_loop_threshold {
         let mut jit_config = vm.jit_config().clone();
@@ -81,6 +92,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         vm.set_jit_config(jit_config);
     }
     register_functions(&mut vm, &compiled.functions)?;
+
+    if let Some(record_path) = cli.record_path.as_ref() {
+        let program = recording_program.expect("recording mode should clone program");
+        let mut debugger = Debugger::with_recording(program);
+        loop {
+            let status = vm.run_with_debugger(&mut debugger)?;
+            match status {
+                VmStatus::Halted => {
+                    println!("vm halted");
+                    println!("stack: {:?}", vm.stack());
+                    break;
+                }
+                VmStatus::Yielded => {
+                    println!("vm yielded, resuming...");
+                    continue;
+                }
+            }
+        }
+        let recording = debugger
+            .take_recording()
+            .ok_or_else(|| io::Error::other("recording state unavailable"))?;
+        recording.save_to_file(record_path)?;
+        println!(
+            "recording saved to {} (frames={})",
+            record_path,
+            recording.frames.len()
+        );
+        return Ok(());
+    }
 
     let mut debugger = if cli.debug {
         let mut debugger = if let Some(addr) = &cli.tcp_addr {
@@ -198,6 +238,20 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
                 cfg.disasm_vmbc_path = Some(path.clone());
                 index += 2;
             }
+            "--record" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --record".to_string())?;
+                cfg.record_path = Some(path.clone());
+                index += 2;
+            }
+            "--view-record" => {
+                let path = args
+                    .get(index + 1)
+                    .ok_or_else(|| "missing value for --view-record".to_string())?;
+                cfg.view_recording_path = Some(path.clone());
+                index += 2;
+            }
             "--show-source" => {
                 cfg.show_source = true;
                 index += 1;
@@ -228,6 +282,8 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             || cfg.jit_dump
             || cfg.jit_hot_loop_threshold.is_some()
             || cfg.emit_vmbc_path.is_some()
+            || cfg.record_path.is_some()
+            || cfg.view_recording_path.is_some()
         {
             return Err(
                 "repl mode cannot be combined with debug/jit/emit-vmbc runtime flags".to_string(),
@@ -244,6 +300,8 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             || cfg.jit_dump
             || cfg.jit_hot_loop_threshold.is_some()
             || cfg.emit_vmbc_path.is_some()
+            || cfg.record_path.is_some()
+            || cfg.view_recording_path.is_some()
         {
             return Err(
                 "disasm mode cannot be combined with repl/debug/jit/emit-vmbc runtime flags"
@@ -252,6 +310,39 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
         }
     } else if cfg.show_source {
         return Err("--show-source requires --disasm-vmbc".to_string());
+    }
+    if cfg.record_path.is_some() {
+        if cfg.debug
+            || cfg.tcp_addr.is_some()
+            || cfg.jit_dump
+            || cfg.jit_hot_loop_threshold.is_some()
+            || cfg.emit_vmbc_path.is_some()
+            || cfg.disasm_vmbc_path.is_some()
+            || cfg.view_recording_path.is_some()
+            || cfg.show_source
+        {
+            return Err(
+                "record mode cannot be combined with debug/jit/emit/disasm/view-record flags"
+                    .to_string(),
+            );
+        }
+    }
+    if cfg.view_recording_path.is_some() {
+        if cfg.source.is_some()
+            || cfg.debug
+            || cfg.tcp_addr.is_some()
+            || cfg.jit_dump
+            || cfg.jit_hot_loop_threshold.is_some()
+            || cfg.emit_vmbc_path.is_some()
+            || cfg.disasm_vmbc_path.is_some()
+            || cfg.record_path.is_some()
+            || cfg.show_source
+        {
+            return Err(
+                "view-record mode cannot be combined with source/debug/jit/emit/disasm flags"
+                    .to_string(),
+            );
+        }
     }
 
     Ok(cfg)
@@ -303,6 +394,8 @@ fn print_usage() {
     println!("  pd-vm-run repl");
     println!("  pd-vm-run --emit-vmbc <output.vmbc> [source_path]");
     println!("  pd-vm-run --disasm-vmbc <input.vmbc> [--show-source]");
+    println!("  pd-vm-run --record <output.pdr> [source_path]");
+    println!("  pd-vm-run --view-record <input.pdr>");
     println!("  pd-vm-run --debug [--stop-on-entry|--no-stop-on-entry] [source_path]");
     println!("  pd-vm-run --debug --tcp <addr> [source_path]");
     println!(
@@ -739,6 +832,29 @@ mod tests {
         ])
         .expect_err("parse should fail");
         assert!(err.contains("does not accept a source path"));
+    }
+
+    #[test]
+    fn parse_cli_record_path() {
+        let cfg = parse_cli_args(&[s("--record"), s("out/run.pdr"), s("examples/example.rss")])
+            .expect("parse should succeed");
+        assert_eq!(cfg.record_path.as_deref(), Some("out/run.pdr"));
+        assert_eq!(cfg.source.as_deref(), Some("examples/example.rss"));
+    }
+
+    #[test]
+    fn parse_cli_view_record_path() {
+        let cfg =
+            parse_cli_args(&[s("--view-record"), s("out/run.pdr")]).expect("parse should succeed");
+        assert_eq!(cfg.view_recording_path.as_deref(), Some("out/run.pdr"));
+        assert!(cfg.source.is_none());
+    }
+
+    #[test]
+    fn parse_cli_record_rejects_debug() {
+        let err = parse_cli_args(&[s("--record"), s("run.pdr"), s("--debug")])
+            .expect_err("parse should fail");
+        assert!(err.contains("record mode"));
     }
 
     #[test]

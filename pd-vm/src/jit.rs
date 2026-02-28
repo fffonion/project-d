@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::builtins::BuiltinFunction;
-use crate::debug::DebugInfo;
+use crate::debug_info::DebugInfo;
 use crate::vm::{OpCode, Program};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

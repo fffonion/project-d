@@ -1,11 +1,12 @@
 use std::collections::HashSet;
 use std::io::{self, BufRead, Write};
 use std::net::{TcpListener, TcpStream};
+use std::path::Path;
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::debug::DebugInfo;
-use crate::vm::Vm;
+use crate::debug_info::DebugInfo;
+use crate::vm::{Program, Value, Vm, VmStatus};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StepMode {
@@ -15,12 +16,40 @@ pub enum StepMode {
     StepOut { depth: usize },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct VmRecordingFrame {
+    pub ip: usize,
+    pub call_depth: usize,
+    pub stack: Vec<Value>,
+    pub locals: Vec<Value>,
+}
+
+#[derive(Clone, Debug)]
+pub struct VmRecording {
+    pub program: Program,
+    pub frames: Vec<VmRecordingFrame>,
+    pub terminal_status: Option<VmStatus>,
+}
+
+#[derive(Debug)]
+pub enum VmRecordingError {
+    Io(io::Error),
+    Wire(crate::vmbc::WireError),
+    InvalidFormat(&'static str),
+    Message(String),
+}
+
+struct VmRecordingBuilder {
+    recording: VmRecording,
+}
+
 pub struct Debugger {
     breakpoints: HashSet<usize>,
     line_breakpoints: HashSet<u32>,
     step_mode: StepMode,
     server: Option<DebugServer>,
     bridge: Option<DebugCommandBridge>,
+    recording: Option<VmRecordingBuilder>,
     client_detached: bool,
 }
 
@@ -75,6 +104,182 @@ impl Default for Debugger {
     }
 }
 
+impl VmRecordingFrame {
+    fn from_vm(vm: &Vm) -> Self {
+        Self {
+            ip: vm.ip(),
+            call_depth: vm.call_depth(),
+            stack: vm.stack().to_vec(),
+            locals: vm.locals().to_vec(),
+        }
+    }
+}
+
+impl VmRecordingBuilder {
+    fn new(program: Program) -> Self {
+        Self {
+            recording: VmRecording {
+                program,
+                frames: Vec::new(),
+                terminal_status: None,
+            },
+        }
+    }
+
+    fn record_state(&mut self, vm: &Vm) {
+        let frame = VmRecordingFrame::from_vm(vm);
+        if self.recording.frames.last() == Some(&frame) {
+            return;
+        }
+        self.recording.frames.push(frame);
+    }
+
+    fn on_terminal_status(&mut self, vm: &Vm, status: VmStatus) {
+        self.record_state(vm);
+        self.recording.terminal_status = Some(status);
+    }
+
+    fn finish(self) -> VmRecording {
+        self.recording
+    }
+}
+
+impl VmRecording {
+    pub fn save_to_file<P: AsRef<Path>>(&self, path: P) -> Result<(), VmRecordingError> {
+        let bytes = self.encode()?;
+        std::fs::write(path, bytes).map_err(VmRecordingError::Io)
+    }
+
+    pub fn load_from_file<P: AsRef<Path>>(path: P) -> Result<Self, VmRecordingError> {
+        let bytes = std::fs::read(path).map_err(VmRecordingError::Io)?;
+        Self::decode(&bytes)
+    }
+
+    pub fn encode(&self) -> Result<Vec<u8>, VmRecordingError> {
+        const MAGIC: [u8; 4] = *b"PDRC";
+        const VERSION: u16 = 1;
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&MAGIC);
+        out.extend_from_slice(&VERSION.to_le_bytes());
+
+        let program_bytes =
+            crate::vmbc::encode_program(&self.program).map_err(VmRecordingError::Wire)?;
+        write_u32_len(program_bytes.len(), &mut out)?;
+        out.extend_from_slice(&program_bytes);
+
+        let status_tag = match self.terminal_status {
+            Some(VmStatus::Halted) => 1u8,
+            Some(VmStatus::Yielded) => 2u8,
+            None => 0u8,
+        };
+        out.push(status_tag);
+
+        write_u32_len(self.frames.len(), &mut out)?;
+        for frame in &self.frames {
+            write_u32_from_usize(frame.ip, &mut out)?;
+            write_u32_from_usize(frame.call_depth, &mut out)?;
+
+            write_u32_len(frame.stack.len(), &mut out)?;
+            for value in &frame.stack {
+                encode_value(value, &mut out)?;
+            }
+
+            write_u32_len(frame.locals.len(), &mut out)?;
+            for value in &frame.locals {
+                encode_value(value, &mut out)?;
+            }
+        }
+
+        Ok(out)
+    }
+
+    pub fn decode(bytes: &[u8]) -> Result<Self, VmRecordingError> {
+        const MAGIC: [u8; 4] = *b"PDRC";
+        const VERSION: u16 = 1;
+
+        let mut cursor = RecordingCursor::new(bytes);
+
+        let magic = cursor.read_exact(4)?;
+        if magic != MAGIC {
+            return Err(VmRecordingError::InvalidFormat("invalid recording magic"));
+        }
+
+        let version = cursor.read_u16()?;
+        if version != VERSION {
+            return Err(VmRecordingError::Message(format!(
+                "unsupported recording version {version}"
+            )));
+        }
+
+        let program_len = cursor.read_u32()? as usize;
+        let program_bytes = cursor.read_exact(program_len)?;
+        let program = crate::vmbc::decode_program(program_bytes).map_err(VmRecordingError::Wire)?;
+
+        let terminal_status = match cursor.read_u8()? {
+            0 => None,
+            1 => Some(VmStatus::Halted),
+            2 => Some(VmStatus::Yielded),
+            _ => {
+                return Err(VmRecordingError::InvalidFormat(
+                    "invalid terminal status tag",
+                ));
+            }
+        };
+
+        let frame_count = cursor.read_u32()? as usize;
+        let mut frames = Vec::with_capacity(frame_count);
+        for _ in 0..frame_count {
+            let ip = cursor.read_u32()? as usize;
+            let call_depth = cursor.read_u32()? as usize;
+
+            let stack_len = cursor.read_u32()? as usize;
+            let mut stack = Vec::with_capacity(stack_len);
+            for _ in 0..stack_len {
+                stack.push(decode_value(&mut cursor)?);
+            }
+
+            let locals_len = cursor.read_u32()? as usize;
+            let mut locals = Vec::with_capacity(locals_len);
+            for _ in 0..locals_len {
+                locals.push(decode_value(&mut cursor)?);
+            }
+
+            frames.push(VmRecordingFrame {
+                ip,
+                call_depth,
+                stack,
+                locals,
+            });
+        }
+
+        if !cursor.is_eof() {
+            return Err(VmRecordingError::InvalidFormat(
+                "trailing bytes in recording payload",
+            ));
+        }
+
+        Ok(Self {
+            program,
+            frames,
+            terminal_status,
+        })
+    }
+}
+
+impl std::fmt::Display for VmRecordingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            VmRecordingError::Io(err) => write!(f, "{err}"),
+            VmRecordingError::Wire(err) => write!(f, "{err}"),
+            VmRecordingError::InvalidFormat(message) => write!(f, "{message}"),
+            VmRecordingError::Message(message) => write!(f, "{message}"),
+        }
+    }
+}
+
+impl std::error::Error for VmRecordingError {}
+
 impl Debugger {
     pub fn new() -> Self {
         Self {
@@ -83,6 +288,7 @@ impl Debugger {
             step_mode: StepMode::Running,
             server: None,
             bridge: None,
+            recording: None,
             client_detached: false,
         }
     }
@@ -96,6 +302,7 @@ impl Debugger {
             step_mode: StepMode::Running,
             server: Some(DebugServer::new(listener)),
             bridge: None,
+            recording: None,
             client_detached: false,
         })
     }
@@ -107,6 +314,19 @@ impl Debugger {
             step_mode: StepMode::Running,
             server: None,
             bridge: Some(bridge),
+            recording: None,
+            client_detached: false,
+        }
+    }
+
+    pub fn with_recording(program: Program) -> Self {
+        Self {
+            breakpoints: HashSet::new(),
+            line_breakpoints: HashSet::new(),
+            step_mode: StepMode::Running,
+            server: None,
+            bridge: None,
+            recording: Some(VmRecordingBuilder::new(program)),
             client_detached: false,
         }
     }
@@ -124,6 +344,10 @@ impl Debugger {
     }
 
     pub fn on_instruction(&mut self, vm: &Vm) {
+        if let Some(recording) = self.recording.as_mut() {
+            recording.record_state(vm);
+        }
+
         let ip = vm.ip();
         let mut should_break = self.breakpoints.contains(&ip);
 
@@ -159,6 +383,16 @@ impl Debugger {
             self.step_mode = StepMode::Running;
             self.client_detached = self.repl(vm);
         }
+    }
+
+    pub fn on_vm_status(&mut self, vm: &Vm, status: VmStatus) {
+        if let Some(recording) = self.recording.as_mut() {
+            recording.on_terminal_status(vm, status);
+        }
+    }
+
+    pub fn take_recording(&mut self) -> Option<VmRecording> {
+        self.recording.take().map(VmRecordingBuilder::finish)
     }
 
     pub fn take_detach_event(&mut self) -> bool {
@@ -664,7 +898,7 @@ fn handle_command(
     ReplAction::Continue
 }
 
-fn format_args_list(func: &crate::debug::DebugFunction) -> String {
+fn format_args_list(func: &crate::debug_info::DebugFunction) -> String {
     let mut parts = Vec::new();
     for arg in &func.args {
         parts.push(format!("{}:{}", arg.position, arg.name));
@@ -733,14 +967,546 @@ fn parse_u32(token: Option<&str>) -> Option<u32> {
     token.and_then(|value| value.parse::<u32>().ok())
 }
 
+pub fn replay_recording_stdio(recording: &VmRecording) {
+    if recording.frames.is_empty() {
+        println!("recording has no captured frames");
+        return;
+    }
+
+    let mut cursor = 0usize;
+    let mut replay_breakpoints = ReplayBreakpoints::default();
+    println!(
+        "recording loaded: frames={}, terminal={:?}",
+        recording.frames.len(),
+        recording.terminal_status
+    );
+    let _ = write_replay_position(recording, cursor, &mut io::stdout());
+
+    let stdin = io::stdin();
+    let mut input = String::new();
+    loop {
+        input.clear();
+        if replay_at_end(recording, cursor) {
+            print!("(pdb-rec:end) ");
+        } else {
+            print!("(pdb-rec) ");
+        }
+        let _ = io::stdout().flush();
+        if stdin.read_line(&mut input).is_err() {
+            break;
+        }
+        if handle_replay_command(
+            &input,
+            recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut io::stdout(),
+        )
+        .is_exit()
+        {
+            break;
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayAction {
+    Continue,
+    Exit,
+}
+
+impl ReplayAction {
+    fn is_exit(self) -> bool {
+        matches!(self, ReplayAction::Exit)
+    }
+}
+
+fn handle_replay_command(
+    line: &str,
+    recording: &VmRecording,
+    cursor: &mut usize,
+    replay_breakpoints: &mut ReplayBreakpoints,
+    out: &mut dyn Write,
+) -> ReplayAction {
+    let mut parts = line.split_whitespace();
+    let Some(cmd) = parts.next() else {
+        return ReplayAction::Continue;
+    };
+    match cmd {
+        "q" | "quit" | "exit" => return ReplayAction::Exit,
+        "c" | "continue" => {
+            if let Some(next) =
+                replay_breakpoints.next_pause_frame(recording, cursor.saturating_add(1))
+            {
+                *cursor = next;
+                replay_breakpoints.consume_pause_at_frame(recording, *cursor);
+            } else {
+                *cursor = recording.frames.len().saturating_sub(1);
+            }
+            let _ = write_replay_position(recording, *cursor, out);
+            return ReplayAction::Continue;
+        }
+        "s" | "step" | "stepi" => {
+            if *cursor + 1 < recording.frames.len() {
+                *cursor += 1;
+            }
+            let _ = write_replay_position(recording, *cursor, out);
+            return ReplayAction::Continue;
+        }
+        "n" | "next" => {
+            *cursor = replay_step_over(recording, *cursor);
+            let _ = write_replay_position(recording, *cursor, out);
+            return ReplayAction::Continue;
+        }
+        "finish" | "out" => {
+            *cursor = replay_step_out(recording, *cursor);
+            let _ = write_replay_position(recording, *cursor, out);
+            return ReplayAction::Continue;
+        }
+        "b" | "break" => {
+            if let Some(arg) = parts.next() {
+                if arg == "line" {
+                    if let Some(line) = parse_u32(parts.next()) {
+                        replay_breakpoints.line_breakpoints.insert(line);
+                        let _ = writeln!(out, "replay pause point set at line {line}");
+                    } else {
+                        let _ = writeln!(out, "usage: break line <number>");
+                    }
+                    return ReplayAction::Continue;
+                }
+                if let Ok(offset) = arg.parse::<usize>() {
+                    replay_breakpoints.offset_breakpoints.insert(offset);
+                    let _ = writeln!(out, "replay pause point set at offset {offset}");
+                } else {
+                    let _ = writeln!(out, "expected instruction offset");
+                }
+            } else {
+                let _ = writeln!(out, "usage: break <offset>");
+            }
+            return ReplayAction::Continue;
+        }
+        "bl" => {
+            if let Some(line) = parse_u32(parts.next()) {
+                replay_breakpoints.line_breakpoints.insert(line);
+                let _ = writeln!(out, "replay pause point set at line {line}");
+            } else {
+                let _ = writeln!(out, "usage: bl <line>");
+            }
+            return ReplayAction::Continue;
+        }
+        "clear" => {
+            if let Some(arg) = parts.next() {
+                if arg == "line" {
+                    if let Some(line) = parse_u32(parts.next()) {
+                        replay_breakpoints.line_breakpoints.remove(&line);
+                        let _ = writeln!(out, "replay pause point cleared at line {line}");
+                    } else {
+                        let _ = writeln!(out, "usage: clear line <number>");
+                    }
+                    return ReplayAction::Continue;
+                }
+                if let Ok(offset) = arg.parse::<usize>() {
+                    replay_breakpoints.offset_breakpoints.remove(&offset);
+                    let _ = writeln!(out, "replay pause point cleared at offset {offset}");
+                } else {
+                    let _ = writeln!(out, "expected instruction offset");
+                }
+            } else {
+                let _ = writeln!(out, "usage: clear <offset>");
+            }
+            return ReplayAction::Continue;
+        }
+        "cl" => {
+            if let Some(line) = parse_u32(parts.next()) {
+                replay_breakpoints.line_breakpoints.remove(&line);
+                let _ = writeln!(out, "replay pause point cleared at line {line}");
+            } else {
+                let _ = writeln!(out, "usage: cl <line>");
+            }
+            return ReplayAction::Continue;
+        }
+        "breaks" => {
+            let _ = writeln!(
+                out,
+                "replay pause offsets: {:?}",
+                replay_breakpoints.offset_breakpoints
+            );
+            let _ = writeln!(
+                out,
+                "replay pause lines: {:?}",
+                replay_breakpoints.line_breakpoints
+            );
+            return ReplayAction::Continue;
+        }
+        _ => {}
+    }
+
+    let frame = &recording.frames[*cursor];
+    match cmd {
+        "stack" => {
+            let _ = writeln!(out, "stack: {:?}", frame.stack);
+        }
+        "locals" => {
+            print_replay_locals(recording, frame, out);
+        }
+        "p" | "print" => {
+            if let Some(name) = parts.next() {
+                print_replay_local_by_name(recording, frame, name, out);
+            } else {
+                let _ = writeln!(out, "usage: print <local_name>");
+            }
+        }
+        "ip" => {
+            let _ = writeln!(out, "ip: {}", frame.ip);
+        }
+        "where" => {
+            print_replay_where(recording, frame, out);
+        }
+        "funcs" => {
+            if let Some(info) = recording.program.debug.as_ref() {
+                for func in &info.functions {
+                    let _ = writeln!(out, "fn {}({})", func.name, format_args_list(func));
+                }
+            } else {
+                let _ = writeln!(out, "no debug info");
+            }
+        }
+        "help" => {
+            let _ = writeln!(
+                out,
+                "commands: break, break line, bl, clear, clear line, cl, breaks, continue, step, next, out, stack, locals, print, ip, where, funcs, help, quit"
+            );
+        }
+        _ => {
+            let _ = writeln!(out, "unknown command");
+        }
+    }
+    ReplayAction::Continue
+}
+
+fn replay_step_over(recording: &VmRecording, cursor: usize) -> usize {
+    if cursor + 1 >= recording.frames.len() {
+        return cursor;
+    }
+    let start = &recording.frames[cursor];
+    for index in (cursor + 1)..recording.frames.len() {
+        let frame = &recording.frames[index];
+        if frame.call_depth <= start.call_depth && frame.ip != start.ip {
+            return index;
+        }
+    }
+    recording.frames.len().saturating_sub(1)
+}
+
+fn replay_step_out(recording: &VmRecording, cursor: usize) -> usize {
+    if cursor + 1 >= recording.frames.len() {
+        return cursor;
+    }
+    let start = &recording.frames[cursor];
+    for index in (cursor + 1)..recording.frames.len() {
+        let frame = &recording.frames[index];
+        if frame.call_depth < start.call_depth {
+            return index;
+        }
+    }
+    recording.frames.len().saturating_sub(1)
+}
+
+fn write_replay_position(
+    recording: &VmRecording,
+    cursor: usize,
+    out: &mut dyn Write,
+) -> io::Result<()> {
+    let last = recording.frames.len().saturating_sub(1);
+    let frame = &recording.frames[cursor];
+    write!(out, "frame {cursor}/{last}")?;
+    if replay_at_end(recording, cursor) {
+        match recording.terminal_status {
+            Some(status) => write!(out, " [end:{status:?}]")?,
+            None => write!(out, " [end]")?,
+        }
+    }
+    write!(out, ": ip={} depth={}", frame.ip, frame.call_depth)?;
+    if let Some(info) = recording.program.debug.as_ref()
+        && let Some(line) = info.line_for_offset(frame.ip)
+    {
+        if let Some(text) = info.source_line(line) {
+            writeln!(out, " line {line}: {text}")?;
+            return Ok(());
+        }
+        writeln!(out, " line: {line}")?;
+        return Ok(());
+    }
+    writeln!(out)?;
+    Ok(())
+}
+
+fn replay_at_end(recording: &VmRecording, cursor: usize) -> bool {
+    cursor + 1 >= recording.frames.len()
+}
+
+#[derive(Default)]
+struct ReplayBreakpoints {
+    offset_breakpoints: HashSet<usize>,
+    line_breakpoints: HashSet<u32>,
+}
+
+impl ReplayBreakpoints {
+    fn next_pause_frame(&self, recording: &VmRecording, start_index: usize) -> Option<usize> {
+        if self.offset_breakpoints.is_empty() && self.line_breakpoints.is_empty() {
+            return None;
+        }
+        for index in start_index..recording.frames.len() {
+            let frame = &recording.frames[index];
+            if self.offset_breakpoints.contains(&frame.ip) {
+                return Some(index);
+            }
+            if let Some(info) = recording.program.debug.as_ref()
+                && let Some(line) = info.line_for_offset(frame.ip)
+                && self.line_breakpoints.contains(&line)
+            {
+                return Some(index);
+            }
+        }
+        None
+    }
+
+    fn consume_pause_at_frame(&mut self, recording: &VmRecording, frame_index: usize) {
+        let Some(frame) = recording.frames.get(frame_index) else {
+            return;
+        };
+        self.offset_breakpoints.remove(&frame.ip);
+        if let Some(info) = recording.program.debug.as_ref()
+            && let Some(line) = info.line_for_offset(frame.ip)
+        {
+            self.line_breakpoints.remove(&line);
+        }
+    }
+}
+
+fn print_replay_locals(recording: &VmRecording, frame: &VmRecordingFrame, out: &mut dyn Write) {
+    let Some(info) = recording.program.debug.as_ref() else {
+        let _ = writeln!(out, "locals: {:?}", frame.locals);
+        return;
+    };
+
+    if info.locals.is_empty() {
+        let _ = writeln!(out, "locals: {:?}", frame.locals);
+        return;
+    }
+
+    for local in &info.locals {
+        match frame.locals.get(local.index as usize) {
+            Some(value) => {
+                let _ = writeln!(out, "{} = {:?}", local.name, value);
+            }
+            None => {
+                let _ = writeln!(out, "{} = <unavailable>", local.name);
+            }
+        }
+    }
+}
+
+fn print_replay_local_by_name(
+    recording: &VmRecording,
+    frame: &VmRecordingFrame,
+    name: &str,
+    out: &mut dyn Write,
+) {
+    let Some(info) = recording.program.debug.as_ref() else {
+        let _ = writeln!(out, "no debug info");
+        return;
+    };
+
+    let Some(index) = info.local_index(name) else {
+        let _ = writeln!(out, "unknown local '{name}'");
+        return;
+    };
+
+    match frame.locals.get(index as usize) {
+        Some(value) => {
+            let _ = writeln!(out, "{name} = {:?}", value);
+        }
+        None => {
+            let _ = writeln!(out, "local '{name}' is out of range for this frame");
+        }
+    }
+}
+
+fn print_replay_where(recording: &VmRecording, frame: &VmRecordingFrame, out: &mut dyn Write) {
+    if let Some(info) = recording.program.debug.as_ref() {
+        if let Some(line) = info.line_for_offset(frame.ip) {
+            if let Some(text) = info.source_line(line) {
+                let _ = writeln!(out, "line {line}: {text}");
+            } else {
+                let _ = writeln!(out, "line: {line}");
+            }
+        } else {
+            let _ = writeln!(out, "line: unknown");
+        }
+    } else {
+        let _ = writeln!(out, "no debug info");
+    }
+}
+
+fn write_u32_len(len: usize, out: &mut Vec<u8>) -> Result<(), VmRecordingError> {
+    let value = u32::try_from(len)
+        .map_err(|_| VmRecordingError::Message(format!("length too large: {len}")))?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn write_u32_from_usize(value: usize, out: &mut Vec<u8>) -> Result<(), VmRecordingError> {
+    let value = u32::try_from(value)
+        .map_err(|_| VmRecordingError::Message(format!("value too large: {value}")))?;
+    out.extend_from_slice(&value.to_le_bytes());
+    Ok(())
+}
+
+fn encode_value(value: &Value, out: &mut Vec<u8>) -> Result<(), VmRecordingError> {
+    match value {
+        Value::Null => out.push(0),
+        Value::Int(value) => {
+            out.push(1);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::Float(value) => {
+            out.push(2);
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        Value::Bool(value) => {
+            out.push(3);
+            out.push(u8::from(*value));
+        }
+        Value::String(value) => {
+            out.push(4);
+            write_u32_len(value.len(), out)?;
+            out.extend_from_slice(value.as_bytes());
+        }
+        Value::Array(values) => {
+            out.push(5);
+            write_u32_len(values.len(), out)?;
+            for value in values {
+                encode_value(value, out)?;
+            }
+        }
+        Value::Map(entries) => {
+            out.push(6);
+            write_u32_len(entries.len(), out)?;
+            for (key, value) in entries {
+                encode_value(key, out)?;
+                encode_value(value, out)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn decode_value(cursor: &mut RecordingCursor<'_>) -> Result<Value, VmRecordingError> {
+    let tag = cursor.read_u8()?;
+    match tag {
+        0 => Ok(Value::Null),
+        1 => Ok(Value::Int(cursor.read_i64()?)),
+        2 => Ok(Value::Float(cursor.read_f64()?)),
+        3 => match cursor.read_u8()? {
+            0 => Ok(Value::Bool(false)),
+            1 => Ok(Value::Bool(true)),
+            _ => Err(VmRecordingError::InvalidFormat("invalid bool value")),
+        },
+        4 => {
+            let len = cursor.read_u32()? as usize;
+            let bytes = cursor.read_exact(len)?;
+            let text = String::from_utf8(bytes.to_vec())
+                .map_err(|_| VmRecordingError::InvalidFormat("invalid utf-8 string"))?;
+            Ok(Value::String(text))
+        }
+        5 => {
+            let len = cursor.read_u32()? as usize;
+            let mut values = Vec::with_capacity(len);
+            for _ in 0..len {
+                values.push(decode_value(cursor)?);
+            }
+            Ok(Value::Array(values))
+        }
+        6 => {
+            let len = cursor.read_u32()? as usize;
+            let mut entries = Vec::with_capacity(len);
+            for _ in 0..len {
+                let key = decode_value(cursor)?;
+                let value = decode_value(cursor)?;
+                entries.push((key, value));
+            }
+            Ok(Value::Map(entries))
+        }
+        _ => Err(VmRecordingError::InvalidFormat("invalid value tag")),
+    }
+}
+
+struct RecordingCursor<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+}
+
+impl<'a> RecordingCursor<'a> {
+    fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, offset: 0 }
+    }
+
+    fn is_eof(&self) -> bool {
+        self.offset == self.bytes.len()
+    }
+
+    fn read_exact(&mut self, len: usize) -> Result<&'a [u8], VmRecordingError> {
+        if self.offset.saturating_add(len) > self.bytes.len() {
+            return Err(VmRecordingError::InvalidFormat(
+                "unexpected end of recording",
+            ));
+        }
+        let start = self.offset;
+        self.offset += len;
+        Ok(&self.bytes[start..self.offset])
+    }
+
+    fn read_u8(&mut self) -> Result<u8, VmRecordingError> {
+        Ok(self.read_exact(1)?[0])
+    }
+
+    fn read_u16(&mut self) -> Result<u16, VmRecordingError> {
+        let bytes = self.read_exact(2)?;
+        Ok(u16::from_le_bytes([bytes[0], bytes[1]]))
+    }
+
+    fn read_u32(&mut self) -> Result<u32, VmRecordingError> {
+        let bytes = self.read_exact(4)?;
+        Ok(u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+    }
+
+    fn read_i64(&mut self) -> Result<i64, VmRecordingError> {
+        let bytes = self.read_exact(8)?;
+        Ok(i64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+
+    fn read_f64(&mut self) -> Result<f64, VmRecordingError> {
+        let bytes = self.read_exact(8)?;
+        Ok(f64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+        ]))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashSet;
 
-    use crate::debug::{DebugInfo, LocalInfo};
-    use crate::vm::{Program, Value, Vm};
+    use crate::debug_info::{DebugInfo, LocalInfo};
+    use crate::vm::{Program, Value, Vm, VmStatus};
 
-    use super::{ReplAction, StepMode, handle_command};
+    use super::{
+        Debugger, ReplAction, ReplayBreakpoints, StepMode, VmRecording, VmRecordingFrame,
+        handle_command, handle_replay_command,
+    };
 
     fn vm_with_named_local(name: &str, value: Value) -> Vm {
         let program = Program::with_debug(
@@ -810,5 +1576,223 @@ mod tests {
         );
         let text = String::from_utf8(out).expect("output should be utf-8");
         assert!(text.contains("unknown local 'missing'"));
+    }
+
+    #[test]
+    fn recording_encode_decode_roundtrip() {
+        let program = Program::with_debug(
+            vec![Value::Int(1)],
+            vec![crate::vm::OpCode::Ret as u8],
+            Some(DebugInfo {
+                source: Some("let x = 1;".to_string()),
+                lines: vec![crate::debug_info::LineInfo { offset: 0, line: 1 }],
+                functions: vec![],
+                locals: vec![LocalInfo {
+                    name: "x".to_string(),
+                    index: 0,
+                }],
+            }),
+        );
+        let recording = VmRecording {
+            program: program.clone(),
+            frames: vec![
+                VmRecordingFrame {
+                    ip: 0,
+                    call_depth: 0,
+                    stack: vec![Value::Array(vec![Value::Int(7), Value::Bool(true)])],
+                    locals: vec![Value::Map(vec![(
+                        Value::String("k".to_string()),
+                        Value::Int(9),
+                    )])],
+                },
+                VmRecordingFrame {
+                    ip: 1,
+                    call_depth: 0,
+                    stack: vec![Value::Int(42)],
+                    locals: vec![Value::Int(42)],
+                },
+            ],
+            terminal_status: Some(VmStatus::Halted),
+        };
+
+        let bytes = recording.encode().expect("encode should succeed");
+        let decoded = VmRecording::decode(&bytes).expect("decode should succeed");
+
+        assert_eq!(decoded.frames, recording.frames);
+        assert_eq!(decoded.terminal_status, recording.terminal_status);
+        assert_eq!(decoded.program.code, program.code);
+        assert_eq!(decoded.program.constants, program.constants);
+        assert_eq!(decoded.program.imports, program.imports);
+        assert_eq!(decoded.program.debug, program.debug);
+    }
+
+    #[test]
+    fn recording_debugger_captures_initial_and_terminal_frames() {
+        let program = Program::new(vec![], vec![crate::vm::OpCode::Ret as u8]);
+        let mut vm = Vm::new(program.clone());
+        let mut debugger = Debugger::with_recording(program);
+
+        let status = vm
+            .run_with_debugger(&mut debugger)
+            .expect("recorded run should succeed");
+        assert_eq!(status, VmStatus::Halted);
+
+        let recording = debugger
+            .take_recording()
+            .expect("recording should be available");
+        assert!(recording.frames.len() >= 2);
+        assert_eq!(recording.frames.first().expect("first frame").ip, 0);
+        assert_eq!(recording.terminal_status, Some(VmStatus::Halted));
+    }
+
+    #[test]
+    fn replay_break_sets_pause_point_for_continue() {
+        let recording = VmRecording {
+            program: Program::new(vec![], vec![]),
+            frames: vec![
+                VmRecordingFrame {
+                    ip: 0,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+                VmRecordingFrame {
+                    ip: 1,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+                VmRecordingFrame {
+                    ip: 2,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+            ],
+            terminal_status: Some(VmStatus::Halted),
+        };
+        let mut cursor = 0usize;
+        let mut replay_breakpoints = ReplayBreakpoints::default();
+        let mut out = Vec::<u8>::new();
+
+        handle_replay_command(
+            "break 1",
+            &recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut out,
+        );
+        out.clear();
+        handle_replay_command(
+            "continue",
+            &recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut out,
+        );
+        let text = String::from_utf8(out).expect("output should be utf-8");
+        assert!(text.contains("frame 1/2"));
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn replay_continue_marks_end_of_recording() {
+        let recording = VmRecording {
+            program: Program::new(vec![], vec![]),
+            frames: vec![
+                VmRecordingFrame {
+                    ip: 0,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+                VmRecordingFrame {
+                    ip: 1,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+            ],
+            terminal_status: Some(VmStatus::Halted),
+        };
+        let mut cursor = 0usize;
+        let mut replay_breakpoints = ReplayBreakpoints::default();
+        let mut out = Vec::<u8>::new();
+
+        handle_replay_command(
+            "continue",
+            &recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut out,
+        );
+
+        let text = String::from_utf8(out).expect("output should be utf-8");
+        assert!(text.contains("[end:Halted]"));
+        assert_eq!(cursor, 1);
+    }
+
+    #[test]
+    fn replay_break_line_sets_pause_point_for_continue() {
+        let program = Program::with_debug(
+            vec![],
+            vec![],
+            Some(DebugInfo {
+                source: None,
+                lines: vec![
+                    crate::debug_info::LineInfo { offset: 0, line: 1 },
+                    crate::debug_info::LineInfo { offset: 5, line: 2 },
+                ],
+                functions: vec![],
+                locals: vec![],
+            }),
+        );
+        let recording = VmRecording {
+            program,
+            frames: vec![
+                VmRecordingFrame {
+                    ip: 0,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+                VmRecordingFrame {
+                    ip: 5,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+                VmRecordingFrame {
+                    ip: 9,
+                    call_depth: 0,
+                    stack: vec![],
+                    locals: vec![],
+                },
+            ],
+            terminal_status: Some(VmStatus::Halted),
+        };
+        let mut cursor = 0usize;
+        let mut replay_breakpoints = ReplayBreakpoints::default();
+        let mut out = Vec::<u8>::new();
+
+        handle_replay_command(
+            "break line 2",
+            &recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut out,
+        );
+        out.clear();
+        handle_replay_command(
+            "continue",
+            &recording,
+            &mut cursor,
+            &mut replay_breakpoints,
+            &mut out,
+        );
+
+        let text = String::from_utf8(out).expect("output should be utf-8");
+        assert!(text.contains("frame 1/2"));
+        assert_eq!(cursor, 1);
     }
 }

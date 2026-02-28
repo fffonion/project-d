@@ -2,7 +2,7 @@ mod builtins;
 
 pub mod assembler;
 pub mod compiler;
-pub mod debug;
+pub mod debug_info;
 pub mod debugger;
 pub mod jit;
 pub mod vm;
@@ -14,10 +14,11 @@ pub use compiler::{
     SourceFlavor, SourcePathError, Stmt, compile_source, compile_source_file,
     compile_source_with_flavor,
 };
-pub use debug::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
+pub use debug_info::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
 pub use debugger::{
     DebugCommandBridge, DebugCommandBridgeError, DebugCommandBridgeResponse,
-    DebugCommandBridgeStatus, Debugger, StepMode,
+    DebugCommandBridgeStatus, Debugger, StepMode, VmRecording, VmRecordingError, VmRecordingFrame,
+    replay_recording_stdio,
 };
 pub use jit::{
     JitAttempt, JitConfig, JitNyiDoc, JitNyiReason, JitSnapshot, JitTrace, JitTraceTerminal,
