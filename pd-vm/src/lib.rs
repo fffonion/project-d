@@ -6,7 +6,7 @@ pub mod debug;
 pub mod debugger;
 pub mod jit;
 pub mod vm;
-pub mod wire;
+pub mod vmbc;
 
 pub use assembler::{AsmParseError, Assembler, AssemblerError, BytecodeBuilder, assemble};
 pub use compiler::{
@@ -27,7 +27,7 @@ pub use vm::{
     CallOutcome, HostBindingPlan, HostFunction, HostFunctionRegistry, HostImport, OpCode, Program,
     StaticHostFunction, Value, Vm, VmError, VmResult, VmStatus,
 };
-pub use wire::{
+pub use vmbc::{
     DisassembleOptions, ValidationError, WireError, decode_program, disassemble_program,
     disassemble_program_with_options, disassemble_vmbc, disassemble_vmbc_with_options,
     encode_program, infer_local_count, validate_program,
