@@ -4,6 +4,7 @@ import type * as Monaco from "monaco-editor";
 
 import { monacoLanguageForFlavor } from "@/app/helpers";
 import { lintWithWasm } from "@/app/lint/wasmLinter";
+import { ensureRustScriptLanguage } from "@/app/monaco/rustscriptLanguage";
 import type { SourceFlavor, UiSourceBundle } from "@/app/types";
 
 const LINT_OWNER = "pd-vm-wasm-lint";
@@ -41,6 +42,7 @@ export function HighlightedCode({
   }, []);
 
   const onEditorMount: OnMount = useCallback((editor, monaco) => {
+    ensureRustScriptLanguage(monaco);
     editorRef.current = editor;
     monacoRef.current = monaco;
     if (!(enableLint && !readOnly)) {
@@ -50,6 +52,10 @@ export function HighlightedCode({
       }
     }
   }, [enableLint, readOnly]);
+
+  const onBeforeMount = useCallback((monaco: typeof import("monaco-editor")) => {
+    ensureRustScriptLanguage(monaco);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -135,6 +141,7 @@ export function HighlightedCode({
     <div className="h-full overflow-auto rounded-md border border-border">
       <Editor
         height={height}
+        beforeMount={onBeforeMount}
         language={language}
         value={code}
         theme="vs"

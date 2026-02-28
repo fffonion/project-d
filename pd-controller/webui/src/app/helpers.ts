@@ -247,7 +247,7 @@ export function monacoLanguageForFlavor(flavor: SourceFlavor | string | null | u
   if (lower === "scheme" || lower === "scm") {
     return "scheme";
   }
-  return "rust";
+  return "rustscript";
 }
 
 export type LineSeries = {

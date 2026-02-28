@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type * as Monaco from "monaco-editor";
 
 import { looksLikeIdentifier } from "@/app/helpers";
+import { ensureRustScriptLanguage } from "@/app/monaco/rustscriptLanguage";
 import type {
   DebugCommandRequest,
   DebugCommandResponse,
@@ -284,6 +285,7 @@ export function useDebugSessions({ onError, edgeSummaries, showDebugSessionsSect
   }, []);
 
   const onDebugEditorMount: OnMount = useCallback((editor, monaco) => {
+    ensureRustScriptLanguage(monaco);
     debugEditorRef.current = editor;
     debugMonacoRef.current = monaco;
     setDebugEditorReadyTick((value) => value + 1);
