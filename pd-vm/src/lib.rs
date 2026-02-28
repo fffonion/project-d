@@ -18,7 +18,8 @@ pub use debug_info::{ArgInfo, DebugFunction, DebugInfo, LineInfo, LocalInfo};
 pub use debugger::{
     DebugCommandBridge, DebugCommandBridgeError, DebugCommandBridgeResponse,
     DebugCommandBridgeStatus, Debugger, StepMode, VmRecording, VmRecordingError, VmRecordingFrame,
-    replay_recording_stdio,
+    VmRecordingReplayResponse, VmRecordingReplayState, replay_recording_stdio,
+    run_recording_replay_command,
 };
 pub use jit::{
     JitAttempt, JitConfig, JitNyiDoc, JitNyiReason, JitSnapshot, JitTrace, JitTraceTerminal,

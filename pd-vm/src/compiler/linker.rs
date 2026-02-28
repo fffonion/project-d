@@ -255,7 +255,7 @@ fn remap_expr_indices(
     function_map: &HashMap<u16, u16>,
 ) -> Result<(), SourcePathError> {
     match expr {
-        Expr::Int(_) | Expr::Bool(_) | Expr::String(_) => {}
+        Expr::Null | Expr::Int(_) | Expr::Bool(_) | Expr::String(_) => {}
         Expr::Call(index, args) => {
             if let Some(remapped_index) = function_map.get(index).copied() {
                 *index = remapped_index;

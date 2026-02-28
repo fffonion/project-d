@@ -49,7 +49,7 @@ pub(super) fn execute_builtin_call(
         BuiltinFunction::IoFlush => builtin_io_flush(vm, args),
         BuiltinFunction::IoClose => builtin_io_close(vm, args),
         BuiltinFunction::IoExists => builtin_io_exists(args),
-        BuiltinFunction::GetOptional => builtin_get_optional(args),
+        BuiltinFunction::TypeOf => builtin_type_of(args),
         BuiltinFunction::Assert => builtin_assert(args),
     }
 }
@@ -211,51 +211,20 @@ fn builtin_get(args: &[Value]) -> VmResult<Vec<Value>> {
     }
 }
 
-fn builtin_get_optional(args: &[Value]) -> VmResult<Vec<Value>> {
-    let container = args
+fn builtin_type_of(args: &[Value]) -> VmResult<Vec<Value>> {
+    let value = args
         .first()
-        .ok_or_else(|| VmError::HostError("missing container argument".to_string()))?;
-    let key = args
-        .get(1)
-        .ok_or_else(|| VmError::HostError("missing key argument".to_string()))?;
-
-    let value = match container {
-        Value::Null => Value::Null,
-        Value::Array(values) => {
-            let Ok(index) = key.as_int() else {
-                return Ok(vec![Value::Null]);
-            };
-            if index < 0 {
-                return Ok(vec![Value::Null]);
-            }
-            let Ok(index) = usize::try_from(index) else {
-                return Ok(vec![Value::Null]);
-            };
-            values.get(index).cloned().unwrap_or(Value::Null)
-        }
-        Value::Map(entries) => entries
-            .iter()
-            .find(|(existing_key, _)| existing_key == key)
-            .map(|(_, value)| value.clone())
-            .unwrap_or(Value::Null),
-        Value::String(text) => {
-            let Ok(index) = key.as_int() else {
-                return Ok(vec![Value::Null]);
-            };
-            if index < 0 {
-                return Ok(vec![Value::Null]);
-            }
-            let Ok(index) = usize::try_from(index) else {
-                return Ok(vec![Value::Null]);
-            };
-            text.chars()
-                .nth(index)
-                .map(|ch| Value::String(ch.to_string()))
-                .unwrap_or(Value::Null)
-        }
-        _ => Value::Null,
+        .ok_or_else(|| VmError::HostError("missing argument to type_of".to_string()))?;
+    let ty = match value {
+        Value::Null => "null",
+        Value::Int(_) => "int",
+        Value::Float(_) => "float",
+        Value::Bool(_) => "bool",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Map(_) => "map",
     };
-    Ok(vec![value])
+    Ok(vec![Value::String(ty.to_string())])
 }
 
 fn builtin_set(args: &[Value]) -> VmResult<Vec<Value>> {

@@ -1245,6 +1245,10 @@ impl Vm {
         &self.locals
     }
 
+    pub fn program(&self) -> &Program {
+        &self.program
+    }
+
     pub fn ip(&self) -> usize {
         self.ip
     }

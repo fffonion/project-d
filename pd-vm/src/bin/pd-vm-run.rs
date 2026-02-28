@@ -320,12 +320,12 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             || cfg.disasm_vmbc_path.is_some()
             || cfg.view_recording_path.is_some()
             || cfg.show_source)
-        {
-            return Err(
-                "record mode cannot be combined with debug/jit/emit/disasm/view-record flags"
-                    .to_string(),
-            );
-        }
+    {
+        return Err(
+            "record mode cannot be combined with debug/jit/emit/disasm/view-record flags"
+                .to_string(),
+        );
+    }
     if cfg.view_recording_path.is_some()
         && (cfg.source.is_some()
             || cfg.debug
@@ -336,12 +336,12 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             || cfg.disasm_vmbc_path.is_some()
             || cfg.record_path.is_some()
             || cfg.show_source)
-        {
-            return Err(
-                "view-record mode cannot be combined with source/debug/jit/emit/disasm flags"
-                    .to_string(),
-            );
-        }
+    {
+        return Err(
+            "view-record mode cannot be combined with source/debug/jit/emit/disasm flags"
+                .to_string(),
+        );
+    }
 
     Ok(cfg)
 }

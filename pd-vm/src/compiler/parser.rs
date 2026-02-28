@@ -1283,20 +1283,129 @@ impl Parser {
                         &TokenKind::RBracket,
                         "expected ']' after optional index expression",
                     )?;
-                    expr = self
-                        .build_builtin_call_expr(BuiltinFunction::GetOptional, vec![expr, key])?;
+                    expr = self.build_optional_get_expr(expr, key)?;
                     continue;
                 }
                 let member = self.expect_ident("expected member name after '?.'")?;
-                expr = self.build_builtin_call_expr(
-                    BuiltinFunction::GetOptional,
-                    vec![expr, Expr::String(member)],
-                )?;
+                expr = self.build_optional_get_expr(expr, Expr::String(member))?;
                 continue;
             }
             break;
         }
         Ok(expr)
+    }
+
+    fn build_optional_get_expr(&mut self, container: Expr, key: Expr) -> Result<Expr, ParseError> {
+        let container_slot = self.allocate_hidden_local()?;
+        let key_slot = self.allocate_hidden_local()?;
+
+        let is_null = self.build_type_check_expr(Expr::Var(container_slot), "null")?;
+        let is_map = self.build_type_check_expr(Expr::Var(container_slot), "map")?;
+        let is_array = self.build_type_check_expr(Expr::Var(container_slot), "array")?;
+        let is_string = self.build_type_check_expr(Expr::Var(container_slot), "string")?;
+        let map_lookup = self.build_optional_map_lookup_expr(container_slot, key_slot)?;
+        let array_lookup = self.build_optional_index_lookup_expr(container_slot, key_slot)?;
+        let string_lookup = self.build_optional_index_lookup_expr(container_slot, key_slot)?;
+        let typed_lookup = Expr::IfElse {
+            condition: Box::new(is_map),
+            then_expr: Box::new(map_lookup),
+            else_expr: Box::new(Expr::IfElse {
+                condition: Box::new(is_array),
+                then_expr: Box::new(array_lookup),
+                else_expr: Box::new(Expr::IfElse {
+                    condition: Box::new(is_string),
+                    then_expr: Box::new(string_lookup),
+                    else_expr: Box::new(Expr::Null),
+                }),
+            }),
+        };
+        let guarded = Expr::IfElse {
+            condition: Box::new(is_null),
+            then_expr: Box::new(Expr::Null),
+            else_expr: Box::new(typed_lookup),
+        };
+
+        let key_bound = self.bind_hidden_local_expr(key_slot, key, guarded)?;
+        self.bind_hidden_local_expr(container_slot, container, key_bound)
+    }
+
+    fn build_type_check_expr(&mut self, value: Expr, expected: &str) -> Result<Expr, ParseError> {
+        let value_type = self.build_builtin_call_expr(BuiltinFunction::TypeOf, vec![value])?;
+        Ok(Expr::Eq(
+            Box::new(value_type),
+            Box::new(Expr::String(expected.to_string())),
+        ))
+    }
+
+    fn build_optional_map_lookup_expr(
+        &mut self,
+        container_slot: u8,
+        key_slot: u8,
+    ) -> Result<Expr, ParseError> {
+        let set_probe = self.build_builtin_call_expr(
+            BuiltinFunction::Set,
+            vec![Expr::Var(container_slot), Expr::Var(key_slot), Expr::Null],
+        )?;
+        let set_probe_len = self.build_builtin_call_expr(BuiltinFunction::Len, vec![set_probe])?;
+        let container_len =
+            self.build_builtin_call_expr(BuiltinFunction::Len, vec![Expr::Var(container_slot)])?;
+        let key_present = Expr::Eq(Box::new(set_probe_len), Box::new(container_len));
+        let value = self.build_builtin_call_expr(
+            BuiltinFunction::Get,
+            vec![Expr::Var(container_slot), Expr::Var(key_slot)],
+        )?;
+        Ok(Expr::IfElse {
+            condition: Box::new(key_present),
+            then_expr: Box::new(value),
+            else_expr: Box::new(Expr::Null),
+        })
+    }
+
+    fn build_optional_index_lookup_expr(
+        &mut self,
+        container_slot: u8,
+        key_slot: u8,
+    ) -> Result<Expr, ParseError> {
+        let key_is_int = self.build_type_check_expr(Expr::Var(key_slot), "int")?;
+        let key_is_negative = Expr::Lt(Box::new(Expr::Var(key_slot)), Box::new(Expr::Int(0)));
+        let container_len =
+            self.build_builtin_call_expr(BuiltinFunction::Len, vec![Expr::Var(container_slot)])?;
+        let key_in_bounds = Expr::Lt(Box::new(Expr::Var(key_slot)), Box::new(container_len));
+        let value = self.build_builtin_call_expr(
+            BuiltinFunction::Get,
+            vec![Expr::Var(container_slot), Expr::Var(key_slot)],
+        )?;
+        let in_range_value = Expr::IfElse {
+            condition: Box::new(key_in_bounds),
+            then_expr: Box::new(value),
+            else_expr: Box::new(Expr::Null),
+        };
+        let non_negative_value = Expr::IfElse {
+            condition: Box::new(key_is_negative),
+            then_expr: Box::new(Expr::Null),
+            else_expr: Box::new(in_range_value),
+        };
+        Ok(Expr::IfElse {
+            condition: Box::new(key_is_int),
+            then_expr: Box::new(non_negative_value),
+            else_expr: Box::new(Expr::Null),
+        })
+    }
+
+    fn bind_hidden_local_expr(
+        &mut self,
+        value_slot: u8,
+        value: Expr,
+        body: Expr,
+    ) -> Result<Expr, ParseError> {
+        let result_slot = self.allocate_hidden_local()?;
+        Ok(Expr::Match {
+            value_slot,
+            result_slot,
+            value: Box::new(value),
+            arms: Vec::new(),
+            default: Box::new(body),
+        })
     }
 
     fn parse_array_literal(&mut self) -> Result<Expr, ParseError> {

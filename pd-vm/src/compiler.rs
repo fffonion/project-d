@@ -166,6 +166,7 @@ pub enum MatchPattern {
 
 #[derive(Clone, Debug)]
 pub enum Expr {
+    Null,
     Int(i64),
     Bool(bool),
     String(String),
@@ -566,6 +567,9 @@ impl Compiler {
 
     fn compile_expr(&mut self, expr: &Expr) -> Result<(), CompileError> {
         match expr {
+            Expr::Null => {
+                self.assembler.push_const(Value::Null);
+            }
             Expr::Int(value) => {
                 self.assembler.push_const(Value::Int(*value));
             }

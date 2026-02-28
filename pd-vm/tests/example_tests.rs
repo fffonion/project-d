@@ -147,3 +147,66 @@ m?.b?.c
         vec![Value::Int(7), Value::Null]
     );
 }
+
+#[test]
+fn nullable_chain_handles_array_and_string_indexes() {
+    let rss_source = r#"
+let arr = [10, 20];
+arr?.[1];
+arr?.[2];
+arr?.["x"];
+let text = "abc";
+text?.[1];
+text?.[5];
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::RustScript, rss_source),
+        vec![
+            Value::Int(20),
+            Value::Null,
+            Value::Null,
+            Value::String("b".to_string()),
+            Value::Null,
+        ]
+    );
+
+    let js_source = r#"
+const arr = [10, 20];
+arr?.[1];
+arr?.[2];
+arr?.["x"];
+const text = "abc";
+text?.[1];
+text?.[5];
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::JavaScript, js_source),
+        vec![
+            Value::Int(20),
+            Value::Null,
+            Value::Null,
+            Value::String("b".to_string()),
+            Value::Null,
+        ]
+    );
+
+    let lua_source = r#"
+local arr = {10, 20}
+arr?.[1]
+arr?.[2]
+arr?.["x"]
+local text = "abc"
+text?.[1]
+text?.[5]
+"#;
+    assert_eq!(
+        run_compiled_source(SourceFlavor::Lua, lua_source),
+        vec![
+            Value::Int(20),
+            Value::Null,
+            Value::Null,
+            Value::String("b".to_string()),
+            Value::Null,
+        ]
+    );
+}
