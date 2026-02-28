@@ -311,24 +311,23 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
     } else if cfg.show_source {
         return Err("--show-source requires --disasm-vmbc".to_string());
     }
-    if cfg.record_path.is_some() {
-        if cfg.debug
+    if cfg.record_path.is_some()
+        && (cfg.debug
             || cfg.tcp_addr.is_some()
             || cfg.jit_dump
             || cfg.jit_hot_loop_threshold.is_some()
             || cfg.emit_vmbc_path.is_some()
             || cfg.disasm_vmbc_path.is_some()
             || cfg.view_recording_path.is_some()
-            || cfg.show_source
+            || cfg.show_source)
         {
             return Err(
                 "record mode cannot be combined with debug/jit/emit/disasm/view-record flags"
                     .to_string(),
             );
         }
-    }
-    if cfg.view_recording_path.is_some() {
-        if cfg.source.is_some()
+    if cfg.view_recording_path.is_some()
+        && (cfg.source.is_some()
             || cfg.debug
             || cfg.tcp_addr.is_some()
             || cfg.jit_dump
@@ -336,14 +335,13 @@ fn parse_cli_args(args: &[String]) -> Result<CliConfig, String> {
             || cfg.emit_vmbc_path.is_some()
             || cfg.disasm_vmbc_path.is_some()
             || cfg.record_path.is_some()
-            || cfg.show_source
+            || cfg.show_source)
         {
             return Err(
                 "view-record mode cannot be combined with source/debug/jit/emit/disasm flags"
                     .to_string(),
             );
         }
-    }
 
     Ok(cfg)
 }

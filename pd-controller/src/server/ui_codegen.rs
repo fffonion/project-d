@@ -2443,5 +2443,3 @@ fn escape_double_quoted(value: &str) -> String {
         .replace('\"', "\\\"")
         .replace('\n', "\\n")
 }
-
-

@@ -43,13 +43,11 @@ const DEBUG_RESUME_GRACE_MS: u64 = 1_500;
 type DebugCommandWaiters =
     tokio::sync::Mutex<HashMap<String, oneshot::Sender<Result<DebugCommandResponse, String>>>>;
 
-mod ui_codegen;
 mod handlers;
+mod ui_codegen;
 
-use self::ui_codegen::{
-    parse_ui_flavor, render_ui_sources, source_for_flavor, ui_block_catalog,
-};
 use self::handlers::*;
+use self::ui_codegen::{parse_ui_flavor, render_ui_sources, source_for_flavor, ui_block_catalog};
 
 mod embedded_webui {
     include!(concat!(env!("OUT_DIR"), "/embedded_webui.rs"));
@@ -1691,5 +1689,3 @@ fn now_unix_ms() -> u64 {
         .map(|duration| duration.as_millis() as u64)
         .unwrap_or(0)
 }
-
-

@@ -164,7 +164,9 @@ pub(super) async fn ui_deploy_handler(
     Ok((StatusCode::ACCEPTED, Json(response)))
 }
 
-pub(super) async fn list_programs_handler(State(state): State<ControllerState>) -> Json<ProgramListResponse> {
+pub(super) async fn list_programs_handler(
+    State(state): State<ControllerState>,
+) -> Json<ProgramListResponse> {
     let mut programs = {
         let guard = state.inner.read().await;
         guard
@@ -539,7 +541,9 @@ pub(super) async fn rpc_result_handler(
     StatusCode::NO_CONTENT
 }
 
-pub(super) async fn list_edges_handler(State(state): State<ControllerState>) -> Json<EdgeListResponse> {
+pub(super) async fn list_edges_handler(
+    State(state): State<ControllerState>,
+) -> Json<EdgeListResponse> {
     let mut edges = {
         let guard = state.inner.read().await;
         guard
@@ -1214,5 +1218,3 @@ async fn process_debug_session_result(
         _ => {}
     }
 }
-
-
