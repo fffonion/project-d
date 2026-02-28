@@ -16,7 +16,7 @@ The admin endpoint accepts compiled VM bytecode via `PUT /program`.
 
 ## Logging
 
-Proxy now emits colored logs (via `tracing`) for:
+Proxy emits colored logs (via `tracing`) for:
 
 - access logs (method, path, status, latency) on both data/admin endpoints
 - program load success/fail and validation/decode errors
@@ -47,7 +47,7 @@ instead of registering host functions one-by-one.
 
 ## Sample Program
 
-`pd-edge/examples/build_sample_program.rs` now:
+`pd-edge/examples/build_sample_program.rs` does:
 
 1. Reads source from default path `examples/sample_proxy_program.rss` (resolved from the `pd-edge` crate root)
 2. Compiles it with `vm::compile_source_file` (extension-driven flavor detection)
