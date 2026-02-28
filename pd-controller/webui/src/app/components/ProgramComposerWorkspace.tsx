@@ -139,7 +139,7 @@ export function ProgramComposerWorkspace({
             onMoveEnd={(_, viewport) => onMoveEnd(viewport)}
             minZoom={0.2}
             maxZoom={2}
-            defaultViewport={{ x: 0, y: 0, zoom: 0.5 }}
+            defaultViewport={{ x: 0, y: 0, zoom: 1 }}
             defaultEdgeOptions={{
               type: "default",
               animated: true,

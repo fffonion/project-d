@@ -32,6 +32,8 @@ type UseComposerArgs = {
   onError: (message: string) => void;
 };
 
+const DEFAULT_FLOW_ZOOM = 1;
+
 export type ComposerProgramApi = {
   activeFlavor: SourceFlavor;
   edges: FlowEdge[];
@@ -69,7 +71,7 @@ export function useComposer({ onError }: UseComposerArgs) {
 
   const hydratingGraphRef = useRef(false);
   const pendingFitViewRef = useRef(false);
-  const flowZoomRef = useRef(0.5);
+  const flowZoomRef = useRef(DEFAULT_FLOW_ZOOM);
   const hydrationTimerRef = useRef<number | null>(null);
   const rfInstanceRef = useRef<ReactFlowInstance<FlowNode, FlowEdge> | null>(null);
   const definitionMapRef = useRef<Map<string, UiBlockDefinition>>(new Map());
@@ -127,8 +129,8 @@ export function useComposer({ onError }: UseComposerArgs) {
     pendingFitViewRef.current = false;
     setNodes([]);
     setEdges([]);
-    flowZoomRef.current = 0.5;
-    rfInstanceRef.current?.setViewport({ x: 0, y: 0, zoom: 0.5 });
+    flowZoomRef.current = DEFAULT_FLOW_ZOOM;
+    rfInstanceRef.current?.setViewport({ x: 0, y: 0, zoom: DEFAULT_FLOW_ZOOM });
     bumpGraphCanvasRevision();
   }, [bumpGraphCanvasRevision, clearHydrationState]);
 
@@ -300,6 +302,25 @@ export function useComposer({ onError }: UseComposerArgs) {
     };
   }, [edges, isCodeEditModeState, nodes, onError]);
 
+  const getViewportCenterPosition = useCallback(() => {
+    const instance = rfInstanceRef.current;
+    if (!instance) {
+      return null;
+    }
+    const flowRoot = document.querySelector(".react-flow");
+    if (!(flowRoot instanceof HTMLElement)) {
+      return null;
+    }
+    const rect = flowRoot.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      return null;
+    }
+    return instance.screenToFlowPosition({
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2
+    });
+  }, []);
+
   const addNode = useCallback(
     (blockId: string, position?: { x: number; y: number }) => {
       const definition = definitionMap.get(blockId);
@@ -310,10 +331,12 @@ export function useComposer({ onError }: UseComposerArgs) {
       setIdSequence(nextId);
       const id = `node-${nextId}`;
       const fallback = { x: 130 + ((nextId - 1) % 4) * 56, y: 120 + ((nextId - 1) % 4) * 56 };
+      const viewportCenter = position ? null : getViewportCenterPosition();
+      const resolvedPosition = position ?? viewportCenter ?? fallback;
       const created: FlowNode = {
         id,
         type: "blockNode",
-        position: position ?? fallback,
+        position: resolvedPosition,
         data: {
           blockId: definition.id,
           definition,
@@ -324,8 +347,49 @@ export function useComposer({ onError }: UseComposerArgs) {
         }
       };
       setNodes((curr) => [...curr, created]);
+
+      // "Add to canvas" has no explicit position; center the node's visual box after measurement.
+      if (!position && viewportCenter) {
+        const seedX = resolvedPosition.x;
+        const seedY = resolvedPosition.y;
+        const recenterAfterMeasure = (attempt: number) => {
+          const instance = rfInstanceRef.current;
+          if (!instance) {
+            return;
+          }
+          const internalNode = instance.getInternalNode(id);
+          const measuredWidth = internalNode?.measured?.width;
+          const measuredHeight = internalNode?.measured?.height;
+
+          if (!measuredWidth || !measuredHeight) {
+            if (attempt < 8) {
+              window.requestAnimationFrame(() => recenterAfterMeasure(attempt + 1));
+            }
+            return;
+          }
+
+          const currentNode = nodesRef.current.find((node) => node.id === id);
+          if (!currentNode) {
+            return;
+          }
+
+          const movedSinceCreate =
+            Math.abs(currentNode.position.x - seedX) > 1 || Math.abs(currentNode.position.y - seedY) > 1;
+          if (movedSinceCreate) {
+            return;
+          }
+
+          const centeredTopLeft = {
+            x: viewportCenter.x - measuredWidth / 2,
+            y: viewportCenter.y - measuredHeight / 2
+          };
+          setNodes((curr) => curr.map((node) => (node.id === id ? { ...node, position: centeredTopLeft } : node)));
+        };
+
+        window.requestAnimationFrame(() => recenterAfterMeasure(0));
+      }
     },
-    [definitionMap, idSequence, removeNode, updateNodeValue]
+    [definitionMap, getViewportCenterPosition, idSequence, removeNode, updateNodeValue]
   );
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => {

@@ -3,6 +3,7 @@ import { Plus } from "lucide-react";
 import { formatUnixMs } from "@/app/helpers";
 import type { ProgramSummary } from "@/app/types";
 import { Button } from "@/components/ui/button";
+import { Card, CardHeader } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 type ProgramListViewProps = {
@@ -24,13 +25,13 @@ export function ProgramListView({
 }: ProgramListViewProps) {
   return (
     <div className="space-y-4">
-      <div className="rounded-xl border border-slate-200/80 bg-white/80 px-4 py-4 backdrop-blur lg:px-6">
-        <div>
+      <Card className="border-slate-200/80 bg-white/80 backdrop-blur">
+        <CardHeader className="pb-3">
           <div className="text-xs uppercase tracking-[0.24em] text-slate-500">Workflow Registry</div>
           <div className="mt-1 text-2xl font-semibold tracking-tight">Programs</div>
           <div className="mt-1 text-sm text-muted-foreground">Store, version, and open workflows for editing.</div>
-        </div>
-      </div>
+        </CardHeader>
+      </Card>
 
       <section className="rounded-xl border border-slate-200/80 bg-white/80 p-4 backdrop-blur">
         <div className="mb-3 flex items-center justify-between gap-3">
