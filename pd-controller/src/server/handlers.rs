@@ -1560,11 +1560,7 @@ async fn process_debug_session_result(
             if let Some(id) = request_id.clone() {
                 session.request_id = Some(id);
             }
-            if let Some(target) = session.recording_target_count
-                && target > 0
-            {
-                session.recording_target_count = Some(target);
-            }
+
 
             let summary = DebugRecordingSummary {
                 recording_id: recording_id.clone(),
