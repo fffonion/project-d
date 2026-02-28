@@ -84,10 +84,12 @@ http://127.0.0.1:9100/ui
 1. Download artifacts from GitHub Releases:
 
 ```bash
-TAG=v0.1.0
-curl -LO https://github.com/fffonion/project-d/releases/download/${TAG}/pd-controller-${TAG}-linux-x86_64.tar.gz
-curl -LO https://github.com/fffonion/project-d/releases/download/${TAG}/pd-edge-${TAG}-linux-x86_64.tar.gz
-curl -LO https://github.com/fffonion/project-d/releases/download/${TAG}/pd-vm-run-${TAG}-linux-x86_64.tar.gz
+REPO=fffonion/project-d
+TAG=$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | awk -F'"' '/"tag_name":/ { print $4; exit }')
+test -n "$TAG"
+curl -fLO "https://github.com/${REPO}/releases/download/${TAG}/pd-controller-${TAG}-linux-x86_64.tar.gz"
+curl -fLO "https://github.com/${REPO}/releases/download/${TAG}/pd-edge-${TAG}-linux-x86_64.tar.gz"
+curl -fLO "https://github.com/${REPO}/releases/download/${TAG}/pd-vm-run-${TAG}-linux-x86_64.tar.gz"
 ```
 
 2. Extract binaries:
@@ -155,3 +157,4 @@ http://127.0.0.1:9100/ui
 - [pd-edge README](pd-edge/README.md)
 - [pd-vm README](pd-vm/README.md)
 - ABI manifest: `pd-edge-abi/abi.json`
+

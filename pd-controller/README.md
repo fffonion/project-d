@@ -11,6 +11,20 @@ It implements:
 - `GET /healthz` and `GET /metrics`
 - embedded WebUI static serving on `/ui` and `/ui/*`
 
+
+### Edge overview
+
+![pd-controller edge overview](screenshots/edge.jpg)
+
+### Program management
+
+![pd-controller program management](screenshots/program.jpg)
+
+### Debugger
+
+![pd-controller debugger](screenshots/debugger.jpg)
+
+
 ## Run
 
 ```powershell
