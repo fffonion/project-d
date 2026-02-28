@@ -23,4 +23,3 @@ const chainedScore = profile?.stats?.score;
 const missingScore = profile?.missing?.value;
 
 console.log(chainedScore);
-console.log(missingScore);
