@@ -560,6 +560,7 @@ async fn tiny_language_can_enforce_simple_rate_limit() {
 
 #[tokio::test]
 async fn debug_attached_request_does_not_block_non_debug_requests() {
+    timeout(Duration::from_secs(10), async {
     let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
@@ -615,6 +616,9 @@ async fn debug_attached_request_does_not_block_non_debug_requests() {
 
     data_handle.abort();
     admin_handle.abort();
+    })
+    .await
+    .expect("test timed out");
 }
 
 #[tokio::test]
@@ -758,6 +762,7 @@ async fn active_control_plane_can_push_program_and_receive_result() {
 
 #[tokio::test]
 async fn debug_session_is_removed_after_debugger_disconnects() {
+    timeout(Duration::from_secs(10), async {
     let (data_addr, admin_addr, data_handle, admin_handle) = spawn_proxy(1024 * 1024).await;
     let client = reqwest::Client::new();
 
@@ -824,4 +829,7 @@ async fn debug_session_is_removed_after_debugger_disconnects() {
 
     data_handle.abort();
     admin_handle.abort();
+    })
+    .await
+    .expect("test timed out");
 }

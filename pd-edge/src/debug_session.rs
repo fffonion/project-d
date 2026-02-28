@@ -47,8 +47,10 @@ pub enum DebugSessionError {
     AlreadyActive,
     InvalidHeaderName,
     EmptyHeaderValue,
+    InvalidTcpAddress(String),
     NotActive,
     NotAttached,
+    RemoteCommandsUnavailable,
     CommandTimeout,
     BridgeClosed,
     InvalidCommand(String),
@@ -60,10 +62,13 @@ impl DebugSessionError {
             DebugSessionError::AlreadyActive => StatusCode::CONFLICT,
             DebugSessionError::InvalidHeaderName
             | DebugSessionError::EmptyHeaderValue
+            | DebugSessionError::InvalidTcpAddress(_)
             | DebugSessionError::CommandTimeout
             | DebugSessionError::InvalidCommand(_)
             | DebugSessionError::BridgeClosed => StatusCode::BAD_REQUEST,
-            DebugSessionError::NotActive | DebugSessionError::NotAttached => StatusCode::CONFLICT,
+            DebugSessionError::NotActive
+            | DebugSessionError::NotAttached
+            | DebugSessionError::RemoteCommandsUnavailable => StatusCode::CONFLICT,
         }
     }
 }
@@ -74,9 +79,13 @@ impl std::fmt::Display for DebugSessionError {
             DebugSessionError::AlreadyActive => write!(f, "debug session already active"),
             DebugSessionError::InvalidHeaderName => write!(f, "invalid debug header name"),
             DebugSessionError::EmptyHeaderValue => write!(f, "debug header value cannot be empty"),
+            DebugSessionError::InvalidTcpAddress(message) => write!(f, "{message}"),
             DebugSessionError::NotActive => write!(f, "debug session is not active"),
             DebugSessionError::NotAttached => {
                 write!(f, "debugger is not attached to a matching request yet")
+            }
+            DebugSessionError::RemoteCommandsUnavailable => {
+                write!(f, "remote debug commands are unavailable for tcp debugger sessions")
             }
             DebugSessionError::CommandTimeout => {
                 write!(f, "timed out waiting for debugger command response")
@@ -123,8 +132,27 @@ pub fn start_debug_session(
         return Err(DebugSessionError::AlreadyActive);
     }
 
-    let bridge = DebugCommandBridge::new();
-    let mut debugger = Debugger::with_command_bridge(bridge.clone());
+    let (mut debugger, mode) = if let Some(addr) = request.tcp_addr.as_deref() {
+        match Debugger::with_tcp(addr) {
+            Ok(debugger) => (
+                debugger,
+                DebugSessionMode::Tcp {
+                    addr: addr.to_string(),
+                },
+            ),
+            Err(err) => {
+                return Err(DebugSessionError::InvalidTcpAddress(format!(
+                    "failed to bind tcp debugger on {addr}: {err}"
+                )));
+            }
+        }
+    } else {
+        let bridge = DebugCommandBridge::new();
+        (
+            Debugger::with_command_bridge(bridge.clone()),
+            DebugSessionMode::Remote { bridge },
+        )
+    };
     if request.stop_on_entry {
         debugger.stop_on_entry();
     }
@@ -134,7 +162,7 @@ pub fn start_debug_session(
         header_value: request.header_value,
         stop_on_entry: request.stop_on_entry,
         debugger: Mutex::new(debugger),
-        bridge,
+        mode,
     });
     let status = DebugSessionStatus::from_session(&session);
     *guard = Some(session);
@@ -152,7 +180,7 @@ pub fn stop_debug_session(store: &SharedDebugSession) -> bool {
     let mut guard = store.session.write().expect("debug session lock poisoned");
     let stopped = guard.take();
     if let Some(session) = stopped {
-        session.bridge.close();
+        session.close();
         info!("{} session stopped", category_debug());
         true
     } else {
@@ -170,8 +198,10 @@ pub fn run_debug_command(
         guard.clone().ok_or(DebugSessionError::NotActive)?
     };
     let (command_text, resume_mode) = debug_command_text(&command)?;
-    let response = session
-        .bridge
+    let bridge = session
+        .bridge()
+        .ok_or(DebugSessionError::RemoteCommandsUnavailable)?;
+    let response = bridge
         .execute(command_text.clone(), COMMAND_TIMEOUT)
         .map_err(map_bridge_error)?;
     if resume_mode {
@@ -242,7 +272,7 @@ fn stop_debug_session_if_match(store: &SharedDebugSession, active: &Arc<DebugSes
     if let Some(current) = guard.as_ref()
         && Arc::ptr_eq(current, active)
     {
-        current.bridge.close();
+        current.close();
         *guard = None;
         info!(
             "{} session removed automatically after debugger detached",
@@ -268,7 +298,12 @@ struct DebugSession {
     header_value: String,
     stop_on_entry: bool,
     debugger: Mutex<Debugger>,
-    bridge: DebugCommandBridge,
+    mode: DebugSessionMode,
+}
+
+enum DebugSessionMode {
+    Remote { bridge: DebugCommandBridge },
+    Tcp { addr: String },
 }
 
 fn debug_command_text(command: &RemoteDebugCommand) -> Result<(String, bool), DebugSessionError> {
@@ -307,15 +342,43 @@ impl DebugSessionStatus {
     }
 
     fn from_session(session: &DebugSession) -> Self {
-        let bridge_status = session.bridge.status();
-        Self {
-            active: true,
-            attached: bridge_status.attached,
-            current_line: bridge_status.current_line,
-            header_name: Some(session.header_name.as_str().to_string()),
-            header_value: Some(session.header_value.clone()),
-            tcp_addr: None,
-            stop_on_entry: Some(session.stop_on_entry),
+        match &session.mode {
+            DebugSessionMode::Remote { bridge } => {
+                let bridge_status = bridge.status();
+                Self {
+                    active: true,
+                    attached: bridge_status.attached,
+                    current_line: bridge_status.current_line,
+                    header_name: Some(session.header_name.as_str().to_string()),
+                    header_value: Some(session.header_value.clone()),
+                    tcp_addr: None,
+                    stop_on_entry: Some(session.stop_on_entry),
+                }
+            }
+            DebugSessionMode::Tcp { addr } => Self {
+                active: true,
+                attached: false,
+                current_line: None,
+                header_name: Some(session.header_name.as_str().to_string()),
+                header_value: Some(session.header_value.clone()),
+                tcp_addr: Some(addr.clone()),
+                stop_on_entry: Some(session.stop_on_entry),
+            },
+        }
+    }
+}
+
+impl DebugSession {
+    fn bridge(&self) -> Option<&DebugCommandBridge> {
+        match &self.mode {
+            DebugSessionMode::Remote { bridge } => Some(bridge),
+            DebugSessionMode::Tcp { .. } => None,
+        }
+    }
+
+    fn close(&self) {
+        if let DebugSessionMode::Remote { bridge } = &self.mode {
+            bridge.close();
         }
     }
 }
