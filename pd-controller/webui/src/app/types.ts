@@ -163,6 +163,12 @@ export type EdgeTrafficPoint = {
   latency_p50_ms: number;
   latency_p90_ms: number;
   latency_p99_ms: number;
+  upstream_latency_p50_ms: number;
+  upstream_latency_p90_ms: number;
+  upstream_latency_p99_ms: number;
+  edge_latency_p50_ms: number;
+  edge_latency_p90_ms: number;
+  edge_latency_p99_ms: number;
 };
 
 export type EdgeDetailResponse = {
