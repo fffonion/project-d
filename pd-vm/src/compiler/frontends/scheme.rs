@@ -469,7 +469,7 @@ pub(super) fn lower(source: &str) -> Result<LoweredSource, ParseError> {
         let before = out.len();
         lower_stmt(form, 0, &mut out)?;
         let added = out.len().saturating_sub(before);
-        line_map.extend(std::iter::repeat(form.line).take(added));
+        line_map.extend(std::iter::repeat_n(form.line, added));
     }
 
     if line_map.is_empty() {

@@ -1215,20 +1215,18 @@ impl Parser {
                     let decl = self.resolve_function_for_call(&name, args.len())?;
                     Expr::Call(decl.index, args)
                 }
+            } else if self.has_local_binding(&name) {
+                let index = self.get_local(&name)?;
+                Expr::Var(index)
+            } else if let Some(decl) = self.functions.get(&name) {
+                Expr::FunctionRef(decl.index)
             } else {
-                if self.has_local_binding(&name) {
-                    let index = self.get_local(&name)?;
-                    Expr::Var(index)
-                } else if let Some(decl) = self.functions.get(&name) {
-                    Expr::FunctionRef(decl.index)
-                } else {
-                    return Err(ParseError {
-                        span: None,
-                        code: None,
-                        line: self.current_line(),
-                        message: format!("unknown local '{name}'"),
-                    });
-                }
+                return Err(ParseError {
+                    span: None,
+                    code: None,
+                    line: self.current_line(),
+                    message: format!("unknown local '{name}'"),
+                });
             };
             expr = self.parse_postfix_access(expr)?;
             return Ok(expr);

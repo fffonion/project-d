@@ -1,7 +1,6 @@
-pub use crate::compiler::diagnostics::render_source_error;
+use super::{Vm, VmError};
 
-#[cfg(feature = "runtime")]
-pub fn render_vm_error(vm: &crate::vm::Vm, err: &crate::vm::VmError) -> String {
+pub fn render_vm_error(vm: &Vm, err: &VmError) -> String {
     let mut out = format!("runtime error: {err}");
     let ip = vm.ip();
     if let Some(debug) = vm.debug_info()

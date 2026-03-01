@@ -13,6 +13,7 @@ use crate::builtins::BuiltinFunction;
 use std::sync::{Mutex, OnceLock};
 
 mod builtin_runtime;
+pub mod diagnostics;
 #[cfg(any(
     all(
         target_arch = "x86_64",

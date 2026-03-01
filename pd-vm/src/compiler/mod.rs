@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use self::source_map::{SourceMap, Span};
 use crate::assembler::{Assembler, AssemblerError};
 use crate::builtins::BuiltinFunction;
-use self::source_map::{SourceMap, Span};
 #[cfg(feature = "runtime")]
 use crate::vm::Vm;
 use crate::{HostImport, Program, Value};
@@ -204,13 +204,13 @@ impl SourceFlavor {
 const STDLIB_PRINT_NAME: &str = "print";
 const STDLIB_PRINT_ARITY: u8 = 1;
 
-mod frontends;
 pub mod diagnostics;
+mod frontends;
 pub mod ir;
 mod linker;
 mod parser;
-pub mod source_map;
 mod source_loader;
+pub mod source_map;
 
 use ir::LinkedIr;
 use linker::merge_units;

@@ -148,7 +148,10 @@ mod tests {
                 SourceFlavor::JavaScript,
                 include_str!("../../examples/example.js"),
             ),
-            (SourceFlavor::Lua, include_str!("../../examples/example.lua")),
+            (
+                SourceFlavor::Lua,
+                include_str!("../../examples/example.lua"),
+            ),
             (
                 SourceFlavor::Scheme,
                 include_str!("../../examples/example.scm"),

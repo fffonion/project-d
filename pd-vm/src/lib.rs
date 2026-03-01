@@ -6,7 +6,6 @@ pub mod compiler;
 pub mod debug_info;
 #[cfg(feature = "runtime")]
 pub mod debugger;
-pub mod diagnostics;
 #[cfg(feature = "runtime")]
 pub mod jit;
 #[cfg(feature = "runtime")]
@@ -16,6 +15,8 @@ pub mod vmbc;
 
 pub use assembler::{AsmParseError, Assembler, AssemblerError, BytecodeBuilder, assemble};
 pub use bytecode::{HostImport, OpCode, Program, Value};
+pub use compiler::diagnostics::render_source_error;
+pub use compiler::source_map::{LineSpanMapping, LoweredSource, SourceId, SourceMap, Span};
 pub use compiler::{
     CompileError, CompiledProgram, Compiler, Expr, FunctionDecl, ParseError, SourceError,
     SourceFlavor, SourcePathError, Stmt, compile_source, compile_source_file,
@@ -29,15 +30,13 @@ pub use debugger::{
     VmRecordingReplayResponse, VmRecordingReplayState, replay_recording_stdio,
     run_recording_replay_command,
 };
-pub use diagnostics::render_source_error;
-#[cfg(feature = "runtime")]
-pub use diagnostics::render_vm_error;
 #[cfg(feature = "runtime")]
 pub use jit::{
     JitAttempt, JitConfig, JitNyiDoc, JitNyiReason, JitSnapshot, JitTrace, JitTraceTerminal,
     TraceJitEngine,
 };
-pub use compiler::source_map::{LineSpanMapping, LoweredSource, SourceId, SourceMap, Span};
+#[cfg(feature = "runtime")]
+pub use vm::diagnostics::render_vm_error;
 #[cfg(feature = "runtime")]
 pub use vm::{
     CallOutcome, HostBindingPlan, HostFunction, HostFunctionRegistry, StaticHostFunction, Vm,
